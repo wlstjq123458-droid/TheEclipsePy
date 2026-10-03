@@ -1,139 +1,337 @@
 """
-승인 처리 공용 로직. 캐비닛/기자재/상상Lab 세 탭이 각자 자기 종류(tab_type)의 신청만
-보여주면서 똑같은 승인 로직을 쓴다 — C# 버전이 _approvals 하나를 탭별로 필터링해서 보여주는
-것과 같은 구조다(별도의 "승인 대기" 탭은 없다).
+승인/반려/복구, 구글 폼 동기화, 기간 만료 정리 — C# MainWindow의
+BtnApproveRequest_Click / BtnRejectRequest_Click / BtnRestoreFromHistory_Click /
+SyncFromGoogleFormAsync / CheckExpiredItems / Show*ExpiryWarningDialog 를 그대로 옮겼다.
 """
 from __future__ import annotations
 
 import datetime
+from typing import TYPE_CHECKING
 
-from PySide6.QtWidgets import (
-    QDialog, QVBoxLayout, QTableWidget, QTableWidgetItem, QHeaderView,
-    QDialogButtonBox, QAbstractItemView,
+from . import widgets as w
+from .constants import TOTAL_CABINETS
+from .context import prefer, is_approved_on_sheet
+from .dialogs import (
+    EquipmentSelectionDialog, CabinetSelectionDialog, ExpiredCleanupDialog,
+    cabinet_expiry_warning, equipment_expiry_warning,
 )
+from .models import ApprovalRequest, CabinetAllocation, RentalItem
 
-from .models import ApprovalRequest, StudentInfo, CabinetAllocation, RentalItem, SeasonConfig
-from .cabinet_tab import format_period, TOTAL_CABINETS
-from .equipment_tab import LAPTOP_LABEL
+if TYPE_CHECKING:  # pragma: no cover
+    from .context import AppContext
 
-
-def register_or_update_master(master_students: list[StudentInfo], req: ApprovalRequest) -> StudentInfo:
-    existing = next((m for m in master_students if m.student_id == req.student_id), None)
-    if existing is None:
-        created = StudentInfo(
-            student_id=req.student_id, name=req.student_name, department=req.department,
-            advisor=req.advisor, email=req.email, contact=req.phone,
-        )
-        master_students.append(created)
-        return created
-    if not existing.name and req.student_name: existing.name = req.student_name
-    if not existing.department and req.department: existing.department = req.department
-    if not existing.advisor and req.advisor: existing.advisor = req.advisor
-    if not existing.email and req.email: existing.email = req.email
-    if not existing.contact and req.phone: existing.contact = req.phone
-    return existing
+TAB_FOR = {"상상Lab": "sangsanglab", "기자재": "equipment"}
 
 
-def default_cabinet_period(season_config: SeasonConfig) -> str:
-    today = datetime.date.today()
-    season = season_config.resolve_season(today)
-    if season:
-        sched = season_config.get_year(season[0])
-        period = next((p for p in sched.seasons if p.name == season[1]), None) if sched else None
-        if period and period.end_date >= today:
-            return format_period(today, period.end_date)
-    try:
-        nxt = today.replace(month=today.month + 1)
-    except ValueError:
-        nxt = today.replace(year=today.year + 1, month=1)
-    return format_period(today, nxt)
+def _tab_of(req: ApprovalRequest) -> str:
+    return TAB_FOR.get(req.tab_type, "cabinet")
 
 
-class ApprovalContext:
-    """탭마다 approve()에 필요한 참조를 한데 묶는다."""
+# ====================================================================== 승인
+def approve(ctx: "AppContext", req: ApprovalRequest) -> None:
+    st = ctx.state
+    parent = ctx.win
 
-    def __init__(self, master_students, cabinet_allocations, rentals, rental_history,
-                 approvals, approval_history, season_config, on_save, warn):
-        self.master_students = master_students
-        self.cabinet_allocations = cabinet_allocations
-        self.rentals = rentals
-        self.rental_history = rental_history
-        self.approvals = approvals
-        self.approval_history = approval_history
-        self.season_config = season_config
-        self.on_save = on_save
-        self.warn = warn  # (title, message) -> None, 보통 QMessageBox.warning 래핑
+    if req.tab_type == "기자재":
+        # 기자재 대여는 일회성이라 학생 마스터에 등록/수정하지 않는다 (있으면 이름만 읽어 온다)
+        master = next((m for m in st.master_students if m.student_id == req.student_id), None)
+    else:
+        master = ctx.register_or_update_master(req)
+        if master is None:
+            return
 
+    chosen_cabinet = -1
+    equip_dialog = None
+    chosen_equip_type = ""
+    chosen_phone = req.phone
 
-def approve(req: ApprovalRequest, ctx: ApprovalContext) -> None:
-    student = register_or_update_master(ctx.master_students, req)
-
-    if req.tab_type == "상상Lab":
-        season = ctx.season_config.resolve_season(datetime.date.today())
-        if season:
-            student.last_active_season = f"{season[0]}_{season[1]}"
+    if req.tab_type == "기자재":
+        active = [r for r in st.rentals if not r.is_returned]
+        dlg = EquipmentSelectionDialog(parent, active, req.phone, req.equipment_type,
+                                       list(st.equipment_issues), req.due_date, ctx.today)
+        if dlg.exec() != EquipmentSelectionDialog.Accepted:
+            return
+        equip_dialog = dlg
+        chosen_equip_type = f"{dlg.selected_equipment_type} ({dlg.selected_unit_number})"
+        chosen_phone = dlg.selected_phone
 
     elif req.tab_type == "캐비닛":
-        dup = next((n for n, a in ctx.cabinet_allocations.items() if a.student and a.student.student_id == student.student_id), None)
-        if dup is not None:
-            ctx.warn("알림", f"이미 {dup}번 캐비닛을 쓰고 있어 중복 배정하지 않았습니다.")
+        m = master
+        dup = next((n for n, a in st.cabinet_allocations.items() if a.student and a.student.student_id == m.student_id), 0)
+        if dup > 0:
+            existing_period = st.cabinet_allocations[dup].period
+            new_period = ctx.season_cabinet_period()
+            if ctx.are_periods_overlapping(existing_period, new_period):
+                w.warn(parent,
+                       f"해당 학생({m.name} / {m.student_id})은 이미 {dup}번 캐비닛에 배정되어 있으며, "
+                       f"대여 기간({existing_period})이 신청 기간({new_period})과 중복됩니다.\n먼저 기존 배정을 해제한 후 승인해 주세요.",
+                       "배정 중복 오류")
+                return
+            merged = ctx.merge_periods(existing_period, new_period)
+            if not w.ask(parent,
+                         f"{m.name} ({m.student_id}) 학생은 {dup}번 캐비닛을 {existing_period} 기간으로 쓰고 있습니다.\n"
+                         f"신청 기간({new_period})이 겹치지 않으므로 {dup}번 캐비닛을 {merged} 로 연장합니다.\n\n계속할까요?",
+                         "대여 기간 연장"):
+                return
+            st.cabinet_allocations[dup] = CabinetAllocation(dup, m.clone(), merged)
+            req.rental_period = merged
+            chosen_cabinet = dup
         else:
-            empty = next((n for n in range(1, TOTAL_CABINETS + 1) if n not in ctx.cabinet_allocations), None)
-            if empty is None:
-                ctx.warn("알림", "빈 캐비닛이 없어 배정하지 못했습니다. 승인은 완료 처리합니다.")
-            else:
-                period = req.rental_period or default_cabinet_period(ctx.season_config)
-                ctx.cabinet_allocations[empty] = CabinetAllocation(cabinet_num=empty, student=student.clone(), period=period)
-
-    elif req.tab_type == "기자재":
-        equip_type = req.equipment_type or LAPTOP_LABEL
-        rental = RentalItem(
-            student_id=student.student_id, student_name=student.name,
-            department=student.department, advisor=student.advisor, phone=student.contact,
-            equipment_type=equip_type, year_level=req.year_level or "",
-            location=req.location or "DSU 창의공간", purpose=req.purpose or "개인 실습",
-            rental_date=datetime.date.today(),
-            rental_period_days=(req.due_date - datetime.date.today()).days if req.due_date else 7,
-        )
-        ctx.rentals.append(rental)
-        ctx.rental_history.append(rental)
+            dlg = CabinetSelectionDialog(parent, st.cabinet_allocations, TOTAL_CABINETS)
+            if dlg.exec() != CabinetSelectionDialog.Accepted:
+                return
+            chosen_cabinet = dlg.selected_cabinet_number
 
     req.status = "승인 완료"
-    _finish(req, ctx)
+    st.approvals.remove(req)
+    st.approval_history.append(req)
 
+    # 상상Lab 승인은 학생 마스터(데이터 관리)만 만든다 — 좌석은 관리자가 직접 배정한다.
 
-def reject(req: ApprovalRequest, ctx: ApprovalContext) -> None:
-    req.status = "반려"
-    _finish(req, ctx)
+    if req.tab_type == "캐비닛" and chosen_cabinet > 0:
+        cur = st.cabinet_allocations.get(chosen_cabinet)
+        if cur is None or cur.student is None or cur.student.student_id != master.student_id:
+            period = ctx.season_cabinet_period()
+            req.rental_period = period
+            st.cabinet_allocations[chosen_cabinet] = CabinetAllocation(chosen_cabinet, master.clone(), period)
 
-
-def _finish(req: ApprovalRequest, ctx: ApprovalContext) -> None:
-    ctx.approvals.remove(req)
-    ctx.approval_history.append(req)
-    ctx.on_save()
-
-
-class ApprovalHistoryDialog(QDialog):
-    """[승인/반려 내역] 버튼 — C#의 ModalApprovalHistory에 대응한다."""
-
-    def __init__(self, parent, approval_history: list[ApprovalRequest], tab_type: str):
-        super().__init__(parent)
-        self.setWindowTitle(f"{tab_type} 승인/반려 내역")
-        self.resize(650, 400)
-        lay = QVBoxLayout(self)
-        rows = sorted(
-            [a for a in approval_history if a.tab_type == tab_type],
-            key=lambda a: a.request_date, reverse=True,
+    if req.tab_type == "기자재" and equip_dialog is not None:
+        days = (equip_dialog.selected_due_date - equip_dialog.selected_rental_date).days
+        if days <= 0:
+            days = 7
+        rental = RentalItem(
+            student_name=prefer(master.name if master else "", req.student_name),
+            equipment_type=chosen_equip_type,
+            rental_date=equip_dialog.selected_rental_date,
+            rental_period_days=days,
+            is_returned=False,
+            student_id=prefer(req.student_id, "20261234"),
+            department=prefer(req.department, "소프트웨어융합학과"),
+            year_level=prefer(req.year_level, "3학년"),
+            phone=prefer(chosen_phone, "010-0000-0000"),
+            advisor=prefer(req.advisor, "김동욱 교수"),
+            location=prefer(req.location, "DSU 창의공간"),
+            purpose=prefer(req.purpose, "개인 실습"),
+            remarks=req.note,
         )
-        table = QTableWidget(len(rows), 4)
-        table.setHorizontalHeaderLabels(["학번", "이름", "상태", "신청일"])
-        table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
-        table.setEditTriggers(QAbstractItemView.NoEditTriggers)
-        for r, a in enumerate(rows):
-            for c, v in enumerate([a.student_id, a.student_name, a.status, a.request_date.strftime("%Y-%m-%d %H:%M")]):
-                table.setItem(r, c, QTableWidgetItem(v))
-        lay.addWidget(table)
-        btns = QDialogButtonBox(QDialogButtonBox.Close)
-        btns.rejected.connect(self.reject)
-        btns.accepted.connect(self.accept)
-        lay.addWidget(btns)
+        st.rentals.append(rental)
+        st.rental_history.append(rental)
+
+    ctx.win.switch_tab(_tab_of(req))
+    ctx.win.dashboard.render_seat_grid()
+    ctx.save_app_state()
+
+
+def reject(ctx: "AppContext", req: ApprovalRequest) -> None:
+    req.status = "반려"
+    ctx.state.approvals.remove(req)
+    ctx.state.approval_history.append(req)
+    ctx.win.switch_tab(_tab_of(req))
+    ctx.save_app_state()
+
+
+def restore_from_history(ctx: "AppContext", req: ApprovalRequest) -> bool:
+    st = ctx.state
+    if not w.ask(ctx.win, f"'{req.student_name}' 학생의 내역을 대기 목록으로 되돌리시겠습니까?", "복구 확인"):
+        return False
+    if req.status == "승인 완료":
+        if req.tab_type == "상상Lab":
+            seat = next((s for s in ctx.win.dashboard.active_seats if s.student and s.student.student_id == req.student_id), None)
+            if seat:
+                seat.student = None
+                seat.is_fixed = False
+        elif req.tab_type == "캐비닛":
+            key = next((n for n, a in st.cabinet_allocations.items() if a.student and a.student.student_id == req.student_id), 0)
+            if key > 0:
+                del st.cabinet_allocations[key]
+        elif req.tab_type == "기자재":
+            rental = next((r for r in st.rentals if r.student_name == req.student_name), None)
+            if rental:
+                st.rentals.remove(rental)
+    req.status = "승인 대기"
+    if req in st.approval_history:
+        st.approval_history.remove(req)
+    st.approvals.append(req)
+    ctx.win.switch_tab(_tab_of(req))
+    ctx.win.dashboard.render_seat_grid()
+    ctx.win.update_alert_badges()
+    w.info(ctx.win, "신청 내역이 대기 목록으로 성공적으로 복구되었습니다.", "복구 완료")
+    return True
+
+
+def show_history(ctx: "AppContext", scope: str) -> None:
+    from .dialogs import ApprovalHistoryModal
+    ApprovalHistoryModal(ctx.win, ctx.state.approval_history, scope,
+                         lambda req: restore_from_history(ctx, req)).exec()
+
+
+# ====================================================================== 구글 폼 동기화
+def sync_from_google_form(ctx: "AppContext", silent: bool) -> None:
+    win = ctx.win
+    svc = win.forms_service
+    if svc is None or win.is_syncing:
+        return
+    win.is_syncing = True
+    win.settings_tab.set_sync_enabled(False)
+    win.settings_tab.set_sync_status("동기화 중...", False)
+    try:
+        st = ctx.state
+        result = svc.fetch(lambda key: key in st.imported_source_keys)
+        now = datetime.datetime.now().strftime("%H:%M:%S")
+        if not result.is_success:
+            win.settings_tab.set_sync_status(f"[{now}] {result.error}", True)
+            if not silent:
+                w.error(win, result.error, "동기화 실패")
+            return
+
+        auto_rejected = []
+        equipment_pending_on_sheet = 0
+        for req in result.new_requests:
+            if not req.student_name.strip():
+                req.student_name = (
+                    next((m.name for m in st.master_students if m.student_id == req.student_id), None)
+                    or next((a.student_name for a in st.approvals if a.student_id == req.student_id and a.student_name.strip()), None)
+                    or ""
+                )
+            if req.tab_type == "기자재":
+                if is_approved_on_sheet(req.sheet_approval_status):
+                    st.imported_source_keys.add(req.source_key)
+                    st.approvals.append(req)
+                else:
+                    equipment_pending_on_sheet += 1
+                continue
+
+            st.imported_source_keys.add(req.source_key)
+            if req.tab_type == "캐비닛":
+                if not req.rental_period.strip():
+                    req.rental_period = ctx.default_cabinet_period
+                reason = ctx.find_cabinet_conflict(req)
+                if reason:
+                    req.status = "반려"
+                    req.note = reason if not req.note.strip() else f"{req.note} / {reason}"
+                    st.approval_history.append(req)
+                    auto_rejected.append(req)
+                    continue
+            st.approvals.append(req)
+
+        win.refresh_approval_views()
+        if result.new_requests:
+            ctx.save_app_state()
+
+        if auto_rejected:
+            lines = "\n".join(f"• {r.student_name} ({r.student_id}) — {r.rental_period}" for r in auto_rejected)
+            w.warn(win, f"아래 {len(auto_rejected)}건은 캐비닛 배정 기간이 중복되어 자동으로 반려 처리되었습니다.\n\n{lines}\n\n"
+                        "[📋 승인/반려 내역]에서 확인하거나 복구할 수 있습니다.", "배정 중복 오류")
+
+        added = len(result.new_requests) - equipment_pending_on_sheet
+        summary = f"[{now}] 응답 {result.total_rows}건 중 신규 {added}건 반영"
+        if result.duplicate_count:
+            summary += f" (기존 {result.duplicate_count}건 건너뜀)"
+        if equipment_pending_on_sheet:
+            summary += f" (기자재 시트 승인 대기 {equipment_pending_on_sheet}건 — 다음 동기화 때 재확인)"
+        by_type: dict[str, int] = {}
+        for a in st.approvals:
+            by_type[a.tab_type] = by_type.get(a.tab_type, 0) + 1
+        summary += "\n승인 대기: " + (" / ".join(f"{k} {v}건" for k, v in by_type.items()) if by_type else "없음")
+        if result.missing_columns:
+            summary += f"\n⚠ 헤더에서 찾지 못한 항목: {', '.join(result.missing_columns)}"
+        if result.unmapped_spaces:
+            summary += f"\n⚠ 신청 공간을 판별하지 못한 값: {' / '.join(result.unmapped_spaces)} → '미분류'로 등록됨"
+        for warning in result.warnings:
+            summary += f"\n⚠ {warning}"
+        win.settings_tab.set_sync_status(summary, bool(result.missing_columns or result.unmapped_spaces or result.warnings))
+        if not silent:
+            w.info(win, summary, "동기화 완료")
+    finally:
+        win.is_syncing = False
+        win.settings_tab.set_sync_enabled(True)
+
+
+# ====================================================================== 기간 만료
+def show_cabinet_expiry_warning(ctx: "AppContext") -> None:
+    today = ctx.today
+    items = []
+    for n, a in ctx.state.cabinet_allocations.items():
+        r = ctx.parse_period_dates(a.period)
+        if r is None:
+            continue
+        days = (r[1] - today).days
+        if days <= 7:
+            items.append((n, a.student, a.period, days))
+    if items:
+        items.sort(key=lambda x: x[3])
+        cabinet_expiry_warning(ctx.win, today, items)
+
+
+def show_equipment_expiry_warning(ctx: "AppContext") -> None:
+    today = ctx.today
+    items = [(r, (r.due_date - today).days) for r in ctx.state.rentals
+             if not r.is_returned and (r.due_date - today).days <= 7]
+    if items:
+        items.sort(key=lambda x: x[1])
+        equipment_expiry_warning(ctx.win, today, items)
+
+
+def check_expired_items(ctx: "AppContext", scope: str) -> None:
+    today = ctx.today
+    st = ctx.state
+    entries: list[tuple[str, str, callable]] = []
+    if scope == "대시보드":
+        for seat in ctx.win.dashboard.active_seats:
+            if seat.is_pillar or seat.student is None:
+                continue
+            period = ctx.find_student_period(seat.student)
+            r = ctx.parse_period_dates(period)
+            if r is None or r[1] >= today:
+                continue
+
+            def _del(s=seat):
+                s.student = None
+                s.is_fixed = False
+            entries.append((f"좌석|{seat.seat_number}|{seat.student.student_id}|{period}",
+                            f"{seat.seat_number}번 좌석 · {seat.student.name}({seat.student.student_id}) · {period}", _del))
+    elif scope == "기자재":
+        for rental in [r for r in st.rentals if not r.is_returned and r.due_date < today]:
+            def _del(r=rental):
+                r.is_returned = True
+                st.rentals.remove(r)
+            entries.append((f"대여|{rental.id}",
+                            f"{rental.display_equipment} · {rental.student_name}({rental.student_id}) · 반납예정 {rental.due_date:%Y-%m-%d}", _del))
+    elif scope == "캐비닛":
+        for n, a in list(st.cabinet_allocations.items()):
+            r = ctx.parse_period_dates(a.period)
+            if r is None or r[1] >= today:
+                continue
+
+            def _del(num=n):
+                st.cabinet_allocations.pop(num, None)
+                ctx.update_master_cabinet_periods()
+            name = a.student.name if a.student else ""
+            sid = a.student.student_id if a.student else ""
+            entries.append((f"캐비닛|{n}|{sid}|{a.period}", f"{n}번 캐비닛 · {name}({sid}) · {a.period}", _del))
+
+    fresh = [e for e in entries if e[0] not in ctx.kept_expired_keys]
+    if not fresh:
+        return
+    dlg = ExpiredCleanupDialog(ctx.win, scope, today, [(k, lbl) for k, lbl, _ in fresh])
+    dlg.exec()
+    if not dlg.delete_confirmed:
+        for k, _, _ in fresh:
+            ctx.kept_expired_keys.add(k)
+        return
+    deleted = 0
+    for k, _, fn in fresh:
+        if k in dlg.selected_keys:
+            fn()
+            deleted += 1
+        else:
+            ctx.kept_expired_keys.add(k)
+    if scope == "대시보드":
+        ctx.win.dashboard.render_seat_grid()
+    elif scope == "기자재":
+        ctx.win.equipment.bind_rentals()
+    elif scope == "캐비닛":
+        ctx.win.cabinet.render_grid()
+    ctx.win.update_alert_badges()
+    if deleted:
+        w.info(ctx.win, f"선택한 {deleted}건을 삭제했습니다.", "정리 완료")

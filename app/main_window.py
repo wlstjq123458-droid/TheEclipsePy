@@ -1,223 +1,288 @@
+"""
+메인 창 — C# 버전 MainWindow.xaml의 바깥 틀(왼쪽 사이드바 220px + 위쪽 헤더 75px + 작업 영역) 그대로.
+"""
 from __future__ import annotations
 
 import datetime
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (
-    QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
-    QStackedWidget, QButtonGroup,
+    QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QStackedWidget, QButtonGroup,
 )
 
-from . import storage, face_integration, theme
-from .widgets import AlertChip
+from . import theme, widgets as w
+from . import approval_logic as al
+from . import google_integration as gi
+from .context import AppContext
 from .seat_tab import SeatTab
-from .data_tab import DataManageTab
-from .cabinet_tab import CabinetTab
 from .equipment_tab import EquipmentTab
+from .cabinet_tab import CabinetTab
 from .sangsanglab_tab import SangsangLabTab
+from .data_tab import DataManageTab
 from .settings_tab import SettingsTab
 
-# (아이콘, 제목, 속성이름) — C# 사이드바 버튼과 정확히 같은 순서·아이콘·개수(6개)를 쓴다.
-# C# 버전에는 "좌석 배정"이라는 별도 탭이 없다 — 대시보드 화면 자체가 좌석 배치도 + 메모다.
-NAV_ITEMS = [
-    ("🏠 대시보드", "seat_tab"),
-    ("🔧 기자재 현황", "equipment_tab"),
-    ("🗄️ 캐비닛 현황", "cabinet_tab"),
-    ("💡 상상Lab 승인", "sangsanglab_tab"),
-    ("📊 데이터 관리", "data_tab"),
-    ("⚙️ 설정", "settings_tab"),
+# (버튼 글자, 화면 이름, 헤더 제목) — C# 사이드바 버튼과 같은 순서·아이콘
+NAV = [
+    ("🏠 대시보드", "dashboard", "대시보드"),
+    ("🔧 기자재 현황", "equipment", "기자재 현황"),
+    ("🗄️ 캐비닛 현황", "cabinet", "캐비닛 현황"),
+    ("💡 상상Lab 승인", "sangsanglab", "상상Lab 승인"),
+    ("📊 데이터 관리", "data", "데이터 관리"),
+    ("⚙️ 설정", "settings", "설정"),
 ]
-DASHBOARD_INDEX = 0
+
+SIDEBAR_CSS = f"""
+QPushButton#side {{
+    background: transparent; color: #E5E7EB; border: none; border-left: 4px solid transparent;
+    padding: 15px 20px 15px 20px; text-align: left; font-size: 14px; font-weight: 600;
+    font-family: {theme.ICON_FAMILIES};
+}}
+QPushButton#side:hover {{ background: #111827; border-left: 4px solid #3B82F6; }}
+QPushButton#side:checked {{ background: #2563EB; color: #FFFFFF; border-left: 4px solid #60A5FA; }}
+"""
 
 
 class MainWindow(QMainWindow):
-    def __init__(self):
+    def __init__(self, ctx: AppContext):
         super().__init__()
-        self.setWindowTitle("동서대학교 좌석 및 기자재 관리 시스템 (Python 버전)")
+        self.ctx = ctx
+        ctx.win = self
+        self.forms_service = None
+        self.is_syncing = False
+        self.current = "dashboard"
+        self.setWindowTitle("동서대학교 좌석 및 기자재 관리 시스템")
         self.resize(1600, 900)
         self.setMinimumSize(1100, 720)
-        self.setStyleSheet(theme.STYLE_SHEET)
-
-        self.seat_cache = storage.load_seat_cache()
-        self.state = storage.load_app_state()
-        self.season_config = storage.load_season_config()
-        self.settings = storage.load_settings()
-
-        if not self.season_config.schedules:
-            cy = datetime.date.today().year
-            for y in (cy - 1, cy, cy + 1):
-                self.season_config.ensure_year(y)
-            storage.save_season_config(self.season_config)
-
-        face_integration.export_roster(self.state.master_students)
 
         self._build_ui()
 
-    # ------------------------------------------------------------------ UI
+        # 1분마다 날짜를 갱신하고, 날짜가 바뀌면 현재 시즌을 다시 판별한다
+        self._date_timer = QTimer(self)
+        self._date_timer.setInterval(60_000)
+        self._date_timer.timeout.connect(self._tick)
+        self._date_timer.start()
+        self._poll_timer = QTimer(self)
+        self._poll_timer.timeout.connect(lambda: self.sync_now(True))
+
+        self.update_alert_badges()
+        self.detect_and_apply_current_season(initial=True)
+        ctx.migrate_students_without_season()
+        self.data.refresh_table()
+        self.dashboard.refresh_memos()
+        self.settings_tab.load_season_settings_ui()
+        QTimer.singleShot(0, self._init_google_form_sync)
+
+    # ------------------------------------------------------------------ 틀
     def _build_ui(self):
         root = QWidget()
+        root.setObjectName("root")
+        root.setStyleSheet("QWidget#root { background:#F3F4F6; }")
         self.setCentralWidget(root)
-        root_lay = QHBoxLayout(root)
-        root_lay.setContentsMargins(0, 0, 0, 0)
-        root_lay.setSpacing(0)
+        h = QHBoxLayout(root)
+        h.setContentsMargins(0, 0, 0, 0)
+        h.setSpacing(0)
 
-        root_lay.addWidget(self._build_sidebar())
-
-        content = QWidget()
-        content.setObjectName("ContentArea")
-        content_lay = QVBoxLayout(content)
-        content_lay.setContentsMargins(0, 0, 0, 0)
-        content_lay.setSpacing(0)
-        content_lay.addWidget(self._build_header())
-
-        self.stack = QStackedWidget()
-        content_lay.addWidget(self.stack, 1)
-        root_lay.addWidget(content, 1)
-
-        self._build_pages()
-
-        self.nav_buttons[DASHBOARD_INDEX].setChecked(True)
-        self.stack.setCurrentIndex(DASHBOARD_INDEX)
-        self.header_alert_area.setVisible(True)
-
-    def _build_sidebar(self) -> QWidget:
-        sidebar = QWidget()
-        sidebar.setObjectName("Sidebar")
-        sidebar.setFixedWidth(220)
-        lay = QVBoxLayout(sidebar)
-        lay.setContentsMargins(0, 0, 0, 0)
-        lay.setSpacing(0)
-
+        # ---- 사이드바 ----
+        side = QWidget()
+        side.setObjectName("sidebar")
+        side.setAttribute(Qt.WA_StyledBackground, True)
+        side.setStyleSheet("QWidget#sidebar { background:#0A1C3E; }" + SIDEBAR_CSS)
+        side.setFixedWidth(220)
+        sl = QVBoxLayout(side)
+        sl.setContentsMargins(0, 0, 0, 0)
+        sl.setSpacing(0)
         logo = QWidget()
         logo.setFixedHeight(70)
-        logo_lay = QHBoxLayout(logo)
-        logo_lay.setContentsMargins(18, 0, 0, 0)
-        lbl1 = QLabel("DSU")
-        lbl1.setObjectName("SidebarLogo")
-        lbl2 = QLabel(" 동서대학교")
-        lbl2.setObjectName("SidebarLogoSub")
-        logo_lay.addWidget(lbl1)
-        logo_lay.addWidget(lbl2)
-        logo_lay.addStretch()
-        lay.addWidget(logo)
-
-        self.nav_buttons: list[QPushButton] = []
+        ll = QHBoxLayout(logo)
+        ll.setContentsMargins(15, 0, 15, 0)
+        ll.setSpacing(0)
+        ll.addWidget(w.label("DSU", 22, bold=True, color="#FFFFFF"), 0, Qt.AlignVCenter)
+        sub = w.label(" 동서대학교", 15, weight=600, color="#93C5FD")
+        sub.setContentsMargins(5, 3, 0, 0)
+        ll.addWidget(sub, 0, Qt.AlignVCenter)
+        ll.addStretch()
+        sl.addWidget(logo)
+        sl.addSpacing(10)
         self.nav_group = QButtonGroup(self)
-        self.nav_group.setExclusive(True)
-        for i, (label, _attr) in enumerate(NAV_ITEMS):
-            btn = QPushButton(label)
-            btn.setProperty("cssClass", "sidebar")
-            btn.setCheckable(True)
-            btn.setCursor(Qt.PointingHandCursor)
-            btn.clicked.connect(lambda _, idx=i: self.go_to(idx))
-            lay.addWidget(btn)
-            self.nav_buttons.append(btn)
-            self.nav_group.addButton(btn, i)
+        self.nav_buttons: dict[str, QPushButton] = {}
+        for text, name, _title in NAV:
+            b = QPushButton(text)
+            b.setObjectName("side")
+            b.setCheckable(True)
+            b.setCursor(Qt.PointingHandCursor)
+            b.clicked.connect(lambda _=False, n=name: self.switch_tab(n))
+            self.nav_group.addButton(b)
+            self.nav_buttons[name] = b
+            sl.addWidget(b)
+        sl.addStretch()
+        h.addWidget(side)
 
-        lay.addStretch()
-        return sidebar
+        # ---- 작업 영역 ----
+        main = QWidget()
+        ml = QVBoxLayout(main)
+        ml.setContentsMargins(0, 0, 0, 0)
+        ml.setSpacing(0)
+        ml.addWidget(self._build_header())
+        self.stack = QStackedWidget()
+        ml.addWidget(self.stack, 1)
+        h.addWidget(main, 1)
+
+        self.dashboard = SeatTab(self.ctx)
+        self.equipment = EquipmentTab(self.ctx)
+        self.cabinet = CabinetTab(self.ctx)
+        self.sangsanglab = SangsangLabTab(self.ctx)
+        self.data = DataManageTab(self.ctx)
+        self.settings_tab = SettingsTab(self.ctx)
+        self.pages = {"dashboard": self.dashboard, "equipment": self.equipment, "cabinet": self.cabinet,
+                      "sangsanglab": self.sangsanglab, "data": self.data, "settings": self.settings_tab}
+        for _t, name, _ in NAV:
+            self.stack.addWidget(self.pages[name])
+        self.nav_buttons["dashboard"].setChecked(True)
+        self.stack.setCurrentWidget(self.dashboard)
 
     def _build_header(self) -> QWidget:
-        header = QWidget()
-        header.setObjectName("Header")
+        header = w.Card(bg="#FFFFFF", border="#E5E7EB", radius=0, padding=(0, 20), sides="bottom")
         header.setFixedHeight(75)
-        lay = QHBoxLayout(header)
-        lay.setContentsMargins(20, 0, 20, 0)
-
-        self.lbl_header_title = QLabel(NAV_ITEMS[DASHBOARD_INDEX][0].split(" ", 1)[1])
-        self.lbl_header_title.setObjectName("HeaderTitle")
-        lay.addWidget(self.lbl_header_title)
-
+        lay = header.hbox()
+        self.lbl_title = w.label("대시보드", 18, bold=True, color="#111827")
+        lay.addWidget(self.lbl_title, 0, Qt.AlignVCenter)
         lay.addSpacing(30)
-        # 대시보드 화면에서만 보이는 3종 알림 카드 (C#의 HeaderAlertArea — TabDashboard일 때만 Visible)
-        self.header_alert_area = QWidget()
-        area_lay = QHBoxLayout(self.header_alert_area)
-        area_lay.setContentsMargins(0, 0, 0, 0)
-        self.chip_sangsanglab = AlertChip("💡", "상상Lab 승인 대기", "#FEE2E2", "#FCA5A5", "#DC2626", lambda: self.go_to(self._nav_index("sangsanglab_tab")))
-        self.chip_cabinet = AlertChip("🗄️", "캐비닛 승인 대기", "#FFEDD5", "#FED7AA", "#EA580C", lambda: self.go_to(self._nav_index("cabinet_tab")))
-        self.chip_equipment = AlertChip("🔧", "기자재 승인 대기", "#FEE2E2", "#FCA5A5", "#DC2626", lambda: self.go_to(self._nav_index("equipment_tab")))
-        for chip in (self.chip_sangsanglab, self.chip_cabinet, self.chip_equipment):
-            area_lay.addWidget(chip)
-            area_lay.addSpacing(10)
-        lay.addWidget(self.header_alert_area)
-
+        self.alert_area = QWidget()
+        al_ = QHBoxLayout(self.alert_area)
+        al_.setContentsMargins(0, 0, 0, 0)
+        al_.setSpacing(12)
+        self.chip_lab = w.AlertCard("💡", "상상Lab 승인 대기", "승인 필요", "#FEE2E2", "#FCA5A5", "#DC2626", "#991B1B", "#DC2626",
+                                    on_click=lambda: self.switch_tab("sangsanglab"))
+        self.chip_cab = w.AlertCard("🗄️", "캐비닛 승인 대기", "승인 필요", "#FFEDD5", "#FED7AA", "#EA580C", "#9A3412", "#EA580C",
+                                    on_click=lambda: self.switch_tab("cabinet"))
+        self.chip_eq = w.AlertCard("🔧", "기자재 승인 대기", "승인 필요", "#FEE2E2", "#FCA5A5", "#DC2626", "#991B1B", "#DC2626",
+                                   on_click=lambda: self.switch_tab("equipment"))
+        for chip in (self.chip_lab, self.chip_cab, self.chip_eq):
+            al_.addWidget(chip)
+        lay.addWidget(self.alert_area, 0, Qt.AlignVCenter)
         lay.addStretch()
 
-        profile = QLabel("👤 관리자")
-        profile.setStyleSheet(f"font-size:13px; font-weight:600; color:{theme.TEXT_SECONDARY};")
-        lay.addWidget(profile)
-        lay.addSpacing(15)
-
-        self.lbl_date = QLabel()
-        self.lbl_date.setObjectName("HeaderDate")
+        prof = QHBoxLayout()
+        prof.setSpacing(0)
+        prof.addWidget(w.label("👤", 16, color="#4B5563", icon=True))
+        prof.addSpacing(5)
+        prof.addWidget(w.label("관리자", 13, weight=600, color="#374151"))
+        prof.addWidget(w.label(" ∨", 10, color="#9CA3AF"))
+        lay.addLayout(prof)
+        lay.addSpacing(20)
+        pill = w.Card(bg="#F3F4F6", border="#F3F4F6", radius=6, padding=(6, 10), border_width=0)
+        pl = pill.hbox()
+        pl.addWidget(w.label("📅 ", 12, color="#4B5563", icon=True))
+        self.lbl_date = w.label("", 12, weight=600, color="#374151")
+        pl.addWidget(self.lbl_date)
+        lay.addWidget(pill, 0, Qt.AlignVCenter)
         self._update_date()
-        lay.addWidget(self.lbl_date)
-
         return header
 
     def _update_date(self):
-        today = datetime.date.today()
-        weekday = "월화수목금토일"[today.weekday()]
-        self.lbl_date.setText(f"📅 {today:%Y-%m-%d} ({weekday})")
+        d = self.ctx.today
+        self.lbl_date.setText(f"{d:%Y-%m-%d} ({'월화수목금토일'[d.weekday()]})")
 
-    def _nav_index(self, attr: str) -> int:
-        for i, (_label, a) in enumerate(NAV_ITEMS):
-            if a == attr:
-                return i
-        return 0
+    def _tick(self):
+        self._update_date()
+        self.detect_and_apply_current_season()
+        self.update_alert_badges()
 
-    def go_to(self, index: int):
-        self.nav_buttons[index].setChecked(True)
-        self.stack.setCurrentIndex(index)
-        self.lbl_header_title.setText(NAV_ITEMS[index][0].split(" ", 1)[1])
-        self.header_alert_area.setVisible(index == DASHBOARD_INDEX)
-        # 다른 화면에서 바뀐 값(새 학생 등록, 승인 처리 등)을 페이지를 옮길 때마다 반영한다.
-        self.data_tab.refresh_table()
-        self.cabinet_tab.refresh_approvals()
-        self.equipment_tab.refresh_approvals()
-        self.sangsanglab_tab.refresh()
-        self._refresh_alert_chips()
+    # ------------------------------------------------------------------ 탭 전환
+    def switch_tab(self, name: str):
+        self.current = name
+        self.nav_buttons[name].setChecked(True)
+        self.stack.setCurrentWidget(self.pages[name])
+        self.lbl_title.setText(next(t for _x, n, t in NAV if n == name))
+        self.alert_area.setVisible(name == "dashboard")
+        if name == "equipment":
+            self.equipment.refresh_approvals()
+            self.equipment.bind_rentals()
+        elif name == "cabinet":
+            self.cabinet.refresh_approvals()
+            self.cabinet.render_grid()
+        elif name == "sangsanglab":
+            self.sangsanglab.refresh()
+        elif name == "data":
+            self.data.refresh_table()
+        elif name == "settings":
+            self.settings_tab.load_season_settings_ui()
+        self.update_alert_badges()
+        if name == "dashboard":
+            al.check_expired_items(self.ctx, "대시보드")
+        elif name == "equipment":
+            al.check_expired_items(self.ctx, "기자재")
+            al.show_equipment_expiry_warning(self.ctx)
+        elif name == "cabinet":
+            al.show_cabinet_expiry_warning(self.ctx)
 
-    def _refresh_alert_chips(self):
-        self.chip_sangsanglab.set_count(sum(1 for a in self.state.approvals if a.tab_type == "상상Lab"))
-        self.chip_cabinet.set_count(sum(1 for a in self.state.approvals if a.tab_type == "캐비닛"))
-        self.chip_equipment.set_count(sum(1 for a in self.state.approvals if a.tab_type == "기자재"))
+    def update_alert_badges(self):
+        ap = self.ctx.state.approvals
+        n_lab = sum(1 for a in ap if a.status == "승인 대기" and a.tab_type == "상상Lab")
+        n_cab = sum(1 for a in ap if a.status == "승인 대기" and a.tab_type == "캐비닛")
+        n_eq = sum(1 for a in ap if a.status == "승인 대기" and a.tab_type == "기자재")
+        for chip, n in ((self.chip_lab, n_lab), (self.chip_cab, n_cab), (self.chip_eq, n_eq)):
+            chip.set_count(n)
+            chip.setVisible(n > 0)
+        self.equipment.alert.set_count(sum(1 for a in ap if a.tab_type == "기자재"))
+        self.equipment.bind_rentals()
+        self.cabinet.alert.set_count(sum(1 for a in ap if a.tab_type == "캐비닛"))
+        self.cabinet.render_grid()
+        self.sangsanglab.alert.set_count(sum(1 for a in ap if a.tab_type == "상상Lab"))
 
-    # ---------------------------------------------------------------- pages
-    def _build_pages(self):
-        self.seat_tab = SeatTab(self.seat_cache, self.state.master_students, self.state.memos, self.save_all)
-        self.equipment_tab = EquipmentTab(
-            self.state.rentals, self.state.rental_history, self.state.equipment_issues,
-            self.state.master_students, self.state.approvals, self.state.approval_history,
-            self.season_config, self.save_all,
-        )
-        self.cabinet_tab = CabinetTab(
-            self.state.cabinet_allocations, self.state.master_students,
-            self.state.approvals, self.state.approval_history, self.season_config, self.save_all,
-        )
-        self.sangsanglab_tab = SangsangLabTab(
-            self.state.approvals, self.state.approval_history, self.state.master_students,
-            self.season_config, self.save_all,
-        )
-        self.data_tab = DataManageTab(self.state.master_students, self.save_all)
-        self.settings_tab = SettingsTab(
-            self.season_config, self.settings, self.state.approvals, self.state.imported_source_keys,
-            self.save_season, self.save_settings, self.save_all,
-        )
+    def refresh_approval_views(self):
+        self.sangsanglab.refresh()
+        self.cabinet.refresh_approvals()
+        self.equipment.refresh_approvals()
+        self.update_alert_badges()
 
-        for _label, attr in NAV_ITEMS:
-            self.stack.addWidget(getattr(self, attr))
+    # ------------------------------------------------------------------ 시즌
+    def detect_and_apply_current_season(self, initial: bool = False):
+        resolved = self.ctx.season_config.resolve_season(self.ctx.today)
+        if resolved is None:
+            if initial:
+                self.dashboard.load_dashboard_layout()
+            else:
+                self.dashboard.update_season_info()
+            self.settings_tab.update_current_info()
+            return
+        changed = self.ctx.current_season != resolved
+        if initial or changed:
+            self.ctx.current_season = resolved
+            self.dashboard.sync_combos_to_season(resolved)
+            self.dashboard.load_dashboard_layout()
+            self.data.refresh_table()
+        self.settings_tab.update_current_info()
 
-        self._refresh_alert_chips()
+    # ------------------------------------------------------------------ 구글 연동
+    def _init_google_form_sync(self):
+        s = self.ctx.settings
+        self.ctx.save_settings()
+        main_id = gi.extract_spreadsheet_id(s.get("SangsangLabFormUrl", ""))
+        self.forms_service = gi.GoogleFormsService(self.ctx.resolve_service_account_key_path(), main_id)
+        self.forms_service.equipment_spreadsheet_id = gi.extract_spreadsheet_id(s.get("EquipmentFormUrl", ""))
+        self.forms_service.cabinet_spreadsheet_id = gi.extract_spreadsheet_id(s.get("CabinetFormUrl", ""))
+        self.settings_tab.update_key_display()
+        if not self.forms_service.key_file_exists:
+            self.settings_tab.set_sync_status(
+                "서비스 계정 키를 찾지 못했습니다. [키 파일 선택...]으로 지정해주세요.\n"
+                f"찾아본 위치: {self.forms_service.key_path}", True)
+            return
+        self.apply_polling_timer()
+        self.sync_now(True)   # 시작 직후 1회 동기화 (조용히)
 
-    def save_all(self):
-        storage.save_seat_cache(self.seat_cache)
-        storage.save_app_state(self.state)
-        face_integration.export_roster(self.state.master_students)
-        self._refresh_alert_chips()
+    def apply_polling_timer(self):
+        self._poll_timer.stop()
+        if not self.ctx.settings.get("PollingEnabled", True):
+            return
+        if self.forms_service is None or not self.forms_service.key_file_exists:
+            return
+        self._poll_timer.start(max(15, int(self.ctx.settings.get("PollingIntervalSeconds", 60))) * 1000)
 
-    def save_season(self):
-        storage.save_season_config(self.season_config)
+    def sync_now(self, silent: bool):
+        al.sync_from_google_form(self.ctx, silent)
 
-    def save_settings(self):
-        storage.save_settings(self.settings)
+    # ------------------------------------------------------------------ 종료
+    def closeEvent(self, e):
+        self.ctx.save_all()
+        super().closeEvent(e)

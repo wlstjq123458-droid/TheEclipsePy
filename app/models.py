@@ -12,6 +12,30 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 
+def _parse_dt(s: str | None) -> datetime.datetime | None:
+    """C# System.Text.Json 날짜("2026-09-20T15:38:12.1234567+09:00")와 파이썬 isoformat을 모두 읽는다."""
+    if not s:
+        return None
+    s = s.strip()
+    m = re.match(r"^(\d{4}-\d{2}-\d{2})(?:[T ](\d{2}:\d{2}(?::\d{2})?)(?:\.(\d+))?)?", s)
+    if not m:
+        return None
+    text = m.group(1)
+    if m.group(2):
+        text += "T" + m.group(2)
+        if m.group(3):
+            text += "." + m.group(3)[:6].ljust(6, "0")
+    try:
+        return datetime.datetime.fromisoformat(text)
+    except ValueError:
+        return None
+
+
+def _parse_d(s: str | None) -> datetime.date | None:
+    dt = _parse_dt(s)
+    return dt.date() if dt else None
+
+
 @dataclass
 class AttendanceRecord:
     date_string: str = ""
@@ -219,7 +243,7 @@ class RentalItem:
     @staticmethod
     def from_dict(d: dict) -> "RentalItem":
         def pdate(s):
-            return datetime.date.fromisoformat(s) if s else None
+            return _parse_d(s)
 
         return RentalItem(
             id=d.get("Id") or str(uuid.uuid4()),
@@ -274,7 +298,7 @@ class EquipmentIssue:
         rd = d.get("ReportDate")
         return EquipmentIssue(
             id=d.get("Id") or str(uuid.uuid4()),
-            report_date=datetime.datetime.fromisoformat(rd) if rd else datetime.datetime.now(),
+            report_date=_parse_dt(rd) or datetime.datetime.now(),
             equipment_name=d.get("EquipmentName", "노트북"),
             unit_number=d.get("UnitNumber", 0),
             issue_type=d.get("IssueType", ""),
@@ -356,7 +380,7 @@ class ApprovalRequest:
             email=d.get("Email", ""),
             tab_type=d.get("TabType", ""),
             equipment_type=d.get("EquipmentType", ""),
-            request_date=datetime.datetime.fromisoformat(rd) if rd else datetime.datetime.now(),
+            request_date=_parse_dt(rd) or datetime.datetime.now(),
             status=d.get("Status", "승인 대기"),
             rental_period=d.get("RentalPeriod", ""),
             sheet_approval_status=d.get("SheetApprovalStatus", ""),
@@ -366,7 +390,7 @@ class ApprovalRequest:
             year_level=d.get("YearLevel", ""),
             location=d.get("Location", ""),
             purpose=d.get("Purpose", ""),
-            due_date=datetime.date.fromisoformat(dd) if dd else None,
+            due_date=_parse_d(dd),
             source_key=d.get("SourceKey", ""),
         )
 
@@ -387,8 +411,8 @@ class SeasonPeriod:
     def from_dict(d: dict) -> "SeasonPeriod":
         return SeasonPeriod(
             name=d.get("Name", ""),
-            start_date=datetime.date.fromisoformat(d["StartDate"]),
-            end_date=datetime.date.fromisoformat(d["EndDate"]),
+            start_date=_parse_d(d.get("StartDate")) or datetime.date.today(),
+            end_date=_parse_d(d.get("EndDate")) or datetime.date.today(),
         )
 
 
