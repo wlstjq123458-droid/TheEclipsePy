@@ -108,7 +108,7 @@ def _draw_assets(folder: str) -> None:
     """콤보박스 화살표·스크롤바 화살표·달력 아이콘을 WPF 모양으로 그려 PNG로 둔다 (실행할 때마다 다시 만든다)."""
     import os
     from PySide6.QtCore import Qt, QPointF, QRectF
-    from PySide6.QtGui import QImage, QPainter, QPen, QColor, QPolygonF
+    from PySide6.QtGui import QFont, QImage, QPainter, QPen, QColor, QPolygonF
 
     os.makedirs(folder, exist_ok=True)
     gray = QColor("#606060")
@@ -136,11 +136,13 @@ def _draw_assets(folder: str) -> None:
     p.setBrush(QColor("#FFFFFF"))
     p.drawRect(QRectF(4, 8, 48, 44))
     p.fillRect(QRectF(4, 8, 48, 10), QColor("#5F5F5F"))
-    p.setPen(Qt.NoPen)
-    p.setBrush(QColor("#5F5F5F"))
-    for r in range(3):
-        for c in range(4):
-            p.drawRect(QRectF(10 + c * 10, 23 + r * 9, 5, 5))
+    # WPF DatePicker 아이콘처럼 달력 안에 "15"를 적는다
+    font = QFont("Segoe UI")
+    font.setPixelSize(27)
+    font.setBold(True)
+    p.setFont(font)
+    p.setPen(QColor("#5F5F5F"))
+    p.drawText(QRectF(4, 18, 48, 34), Qt.AlignCenter, "15")
     p.end()
     img.save(os.path.join(folder, "calendar.png"))
 

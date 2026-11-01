@@ -193,6 +193,10 @@ class AppContext:
         return approved[-1].rental_period if approved else ""
 
     # ------------------------------------------------------------------ 마스터
+    def confirm_name_conflict(self, message: str) -> bool:
+        from . import widgets as w
+        return w.ask_warn(self.win, message, "학번 중복")
+
     def mark_student_active(self, student: Optional[StudentInfo]):
         if student is None or not student.student_id.strip():
             return
@@ -207,7 +211,6 @@ class AppContext:
                 st.last_active_season = key
 
     def register_or_update_master(self, req: ApprovalRequest) -> Optional[StudentInfo]:
-        from . import widgets as w
         existing = next((m for m in self.state.master_students if m.student_id == req.student_id), None)
         if existing is None:
             created = StudentInfo(
@@ -219,15 +222,13 @@ class AppContext:
             return created
 
         if req.student_name.strip() and existing.name != req.student_name:
-            ok = w.ask_warn(
-                self.win,
+            ok = self.confirm_name_conflict(
                 f"학번 {req.student_id}이(가) 이미 다른 이름으로 등록되어 있습니다.\n\n"
                 f"[기존]  {existing.name} / {existing.department} / {existing.advisor}\n"
                 f"[신청]  {req.student_name} / {req.department} / {req.advisor}\n\n"
                 "신청 내용으로 덮어쓸까요?\n"
                 "· 예    → 마스터를 신청 내용으로 수정하고 승인합니다\n"
-                "· 아니오 → 승인을 취소합니다 (학번을 확인해주세요)",
-                "학번 중복",
+                "· 아니오 → 승인을 취소합니다 (학번을 확인해주세요)"
             )
             if not ok:
                 return None

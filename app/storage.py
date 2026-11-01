@@ -9,6 +9,7 @@ SeasonConfig.Load/Save에 대응한다.
 from __future__ import annotations
 
 import json
+import logging
 import os
 from dataclasses import dataclass, field
 
@@ -17,6 +18,18 @@ from .models import (
     Seat, StudentInfo, CabinetAllocation, RentalItem, EquipmentIssue,
     ApprovalRequest, MemoItem, SeasonConfig,
 )
+
+
+log = logging.getLogger(__name__)
+
+
+def write_json(path: str, data, indent=None) -> None:
+    """임시 파일에 다 쓴 뒤 바꿔치기한다 — 저장 도중 꺼져도 기존 파일이 깨지지 않는다."""
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = f"{path}.{os.getpid()}.tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=indent)
+    os.replace(tmp, path)
 
 
 # ============================================================== 좌석 데이터
@@ -36,10 +49,9 @@ def load_seat_cache() -> dict[str, list[Seat]]:
 def save_seat_cache(cache: dict[str, list[Seat]]) -> None:
     try:
         raw = {key: [s.to_dict() for s in seats] for key, seats in cache.items()}
-        with open(config.seats_path(), "w", encoding="utf-8") as f:
-            json.dump(raw, f, ensure_ascii=False)
+        write_json(config.seats_path(), raw)
     except Exception:
-        pass  # 저장 실패는 치명적이지 않다 — 다음 저장 때 다시 시도한다
+        log.exception("좌석 데이터 저장 실패")  # 치명적이지 않다 — 다음 저장 때 다시 시도한다
 
 
 def new_empty_seats() -> list[Seat]:
@@ -61,10 +73,9 @@ def load_season_config() -> SeasonConfig:
 
 def save_season_config(cfg: SeasonConfig) -> None:
     try:
-        with open(config.seasons_path(), "w", encoding="utf-8") as f:
-            json.dump(cfg.to_dict(), f, ensure_ascii=False, indent=2)
+        write_json(config.seasons_path(), cfg.to_dict(), indent=2)
     except Exception:
-        pass
+        log.exception("학사 시즌 일정 저장 실패")
 
 
 # =============================================================== 설정(구글 시트 연동 등)
@@ -81,10 +92,9 @@ def load_settings() -> dict:
 
 def save_settings(settings: dict) -> None:
     try:
-        with open(config.settings_path(), "w", encoding="utf-8") as f:
-            json.dump(settings, f, ensure_ascii=False, indent=2)
+        write_json(config.settings_path(), settings, indent=2)
     except Exception:
-        pass
+        log.exception("설정 저장 실패")
 
 
 # ================================================================ AppState
@@ -146,8 +156,6 @@ def save_app_state(state: AppState) -> None:
             "ImportedSourceKeys": sorted(state.imported_source_keys),
             "Memos": [m.to_dict() for m in state.memos],
         }
-        os.makedirs(config.config_dir(), exist_ok=True)
-        with open(config.appstate_path(), "w", encoding="utf-8") as f:
-            json.dump(raw, f, ensure_ascii=False, indent=2)
+        write_json(config.appstate_path(), raw, indent=2)
     except Exception:
-        pass  # 저장 실패는 치명적이지 않다 — 다음 종료 때 다시 시도한다
+        log.exception("앱 데이터 저장 실패")  # 치명적이지 않다 — 다음 저장 때 다시 시도한다

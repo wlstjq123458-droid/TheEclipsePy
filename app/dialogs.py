@@ -17,7 +17,8 @@ from PySide6.QtWidgets import (
     QCheckBox, QListWidget, QListWidgetItem, QWidget, QFrame, QGridLayout, QSizePolicy,
 )
 
-from . import widgets as w
+from . import theme, widgets as w
+from . import face_integration as fi
 from .constants import MAINFRAME_LABEL, LAPTOP_LABEL
 from .models import RentalItem, EquipmentIssue, ApprovalRequest, StudentInfo
 
@@ -545,34 +546,229 @@ class RentalHistoryModal(w.OverlayDialog):
 
 
 class FaceAttendanceModal(w.OverlayDialog):
-    def __init__(self, owner, load: Callable[[], list], path: str):
-        super().__init__(owner, 750, 520)
+    """[얼굴인식 출결 기록] — 기록 보기(검색·기간 필터)와 월간 기준 확인(주마다 20시간·3회) 두 화면."""
+
+    def __init__(self, owner, load: Callable[[], list], path: str, today: datetime.date):
+        super().__init__(owner, 920, 640)
         self._load = load
         self._path = path
+        self._today = today
+        self._all: list = []
+        self._criteria_mode = False
+
         refresh = w.action_btn("🔄 새로고침", padding=(5, 12), on_click=self.refresh)
-        _modal_header(self, "얼굴인식 출결 기록", extra=refresh, plain_close=True)
+        self.btn_records = w.action_btn("📋 기록 보기", padding=(5, 12), weight=700, on_click=lambda: self._set_mode(False))
+        self.btn_criteria = w.action_btn("✅ 월간 기준 확인", padding=(5, 12), weight=400, on_click=lambda: self._set_mode(True))
+        views = QWidget()
+        vl = QHBoxLayout(views)
+        vl.setContentsMargins(0, 0, 0, 0)
+        vl.setSpacing(0)
+        vl.addWidget(refresh)
+        vl.addSpacing(15)
+        vl.addWidget(self.btn_records)
+        vl.addSpacing(6)
+        vl.addWidget(self.btn_criteria)
+        _modal_header(self, "얼굴인식 출결 기록", extra=views, plain_close=True)
         self.body.addSpacing(4)
         self.info = w.label("", 11, color="#6B7280", wrap=True)
         self.body.addWidget(self.info)
-        self.body.addSpacing(15)
+        self.body.addSpacing(12)
+
+        # 필터 — 검색어(학번/이름) · 기간 · 빠른 기간 버튼. 바꾸면 바로 다시 걸러서 보여준다
+        self.panel_records = w.Card(bg="#F9FAFB", border="#E5E7EB", radius=8, padding=(8, 12))
+        pr = self.panel_records.hbox()
+        pr.addWidget(_filter_caption("학번/이름"))
+        pr.addSpacing(6)
+        self.ed_search = _filter_input(self._apply_records)
+        pr.addWidget(self.ed_search)
+        pr.addSpacing(14)
+        pr.addWidget(_filter_caption("기간"))
+        pr.addSpacing(6)
+        self.dp_from = _OptionalDate(self._apply_records)
+        pr.addWidget(self.dp_from)
+        pr.addWidget(w.label("  ~  ", 12, color="#6B7280"))
+        self.dp_to = _OptionalDate(self._apply_records)
+        pr.addWidget(self.dp_to)
+        pr.addSpacing(10)
+        for text, tag in (("오늘", "today"), ("이번 주", "week"), ("이번 달", "month"), ("전체", "all")):
+            pr.addWidget(w.action_btn(text, padding=(4, 10), on_click=lambda _=False, t=tag: self._quick(t)))
+            pr.addSpacing(4)
+        pr.addStretch()
+        self.body.addWidget(self.panel_records)
+
+        # 월간 기준 확인 필터 — 월 · 결과 · 학번/이름
+        self.panel_criteria = w.Card(bg="#F0FDF4", border="#BBF7D0", radius=8, padding=(8, 12))
+        pv = self.panel_criteria.vbox()
+        pc = QHBoxLayout()
+        pc.setSpacing(0)
+        pv.addLayout(pc)
+        pc.addWidget(_filter_caption("월"))
+        pc.addSpacing(6)
+        self.cmb_month = QComboBox()
+        self.cmb_month.setFixedWidth(110)
+        self.cmb_month.currentIndexChanged.connect(self._apply_criteria)
+        pc.addWidget(self.cmb_month)
+        pc.addSpacing(14)
+        pc.addWidget(_filter_caption("결과"))
+        pc.addSpacing(6)
+        self.cmb_result = QComboBox()
+        self.cmb_result.setFixedWidth(110)
+        self.cmb_result.setStyleSheet(f"QComboBox, QComboBox QAbstractItemView {{ font-family:{theme.ICON_FAMILIES}; }}")
+        self.cmb_result.addItems(["전체", "✅ 충족", "❌ 미충족", "⏳ 진행 중"])
+        self.cmb_result.currentIndexChanged.connect(self._apply_criteria)
+        pc.addWidget(self.cmb_result)
+        pc.addSpacing(14)
+        pc.addWidget(_filter_caption("학번/이름"))
+        pc.addSpacing(6)
+        self.ed_criteria = _filter_input(self._apply_criteria)
+        pc.addWidget(self.ed_criteria)
+        pc.addStretch()
+        rule = w.label(fi.criteria_rule_text(), 11, color="#166534")
+        rule.setContentsMargins(14, 0, 0, 0)
+        pv.addWidget(rule)
+        self.body.addWidget(self.panel_criteria)
+        self.body.addSpacing(10)
+
+        # 합계 — 걸러진 기록 기준
+        self.summary = w.label("", 13, weight=600, color="#111827", wrap=True, icon=True)
+        self.summary.setContentsMargins(2, 0, 0, 0)
+        self.body.addWidget(self.summary)
+        self.body.addSpacing(10)
+
         self.grid = w.DataGrid([
             w.Col("학번", 110, text=lambda r: r.student_id),
             w.Col("이름", 90, text=lambda r: r.name),
             w.Col("날짜", 110, text=lambda r: r.date),
             w.Col("출근", 100, text=lambda r: r.check_in or ""),
-            w.Col("퇴근", stretch=True, min_width=100, text=lambda r: r.check_out or ""),
+            w.Col("퇴근", 100, text=lambda r: r.check_out or ""),
+            w.Col("근무시간", stretch=True, min_width=100, text=lambda r: r.work_time_text),
         ], row_height=35)
-        self.body.addWidget(_grid_box(self.grid), 1)
+        self.box_records = _grid_box(self.grid)
+        self.body.addWidget(self.box_records, 1)
+
+        # 주차 열은 달마다 수가 달라서(4~6주) 고를 때마다 표를 새로 만든다
+        self.box_criteria = w.Card(bg="#F9FAFB", border="#E5E7EB", radius=8, padding=0)
+        self.criteria_lay = self.box_criteria.vbox()
+        self.criteria_lay.setContentsMargins(1, 1, 1, 1)
+        self.grid_criteria: Optional[w.DataGrid] = None
+        self.body.addWidget(self.box_criteria, 1)
+
         self.refresh()
+        self._set_mode(False)
 
     def refresh(self):
-        records = sorted(self._load(), key=lambda r: r.name)
-        records.sort(key=lambda r: r.date, reverse=True)
-        self.grid.set_items(records)
+        self._all = self._load()
         self.info.setText(
-            f"얼굴인식 프로그램(insightface-attendance)이 기록한 출근/퇴근 시간입니다. 총 {len(records)}건."
-            if records else f"아직 기록된 출결 데이터가 없습니다. (파일 위치: {self._path})"
+            f"얼굴인식 프로그램(insightface-attendance)이 기록한 출근/퇴근 시간입니다. 전체 {len(self._all)}건."
+            if self._all else f"아직 기록된 출결 데이터가 없습니다. (파일 위치: {self._path})"
         )
+        self._fill_months()
+        if self._criteria_mode:
+            self._apply_criteria()
+        else:
+            self._apply_records()
+
+    def _set_mode(self, criteria: bool):
+        self._criteria_mode = criteria
+        self.panel_records.setVisible(not criteria)
+        self.box_records.setVisible(not criteria)
+        self.panel_criteria.setVisible(criteria)
+        self.box_criteria.setVisible(criteria)
+        # 지금 보고 있는 쪽 버튼을 강조한다
+        for btn, on in ((self.btn_records, not criteria), (self.btn_criteria, criteria)):
+            btn.setStyleSheet(re.sub(r"font-weight:\d+", f"font-weight:{700 if on else 400}", btn.styleSheet(), count=1))
+        if criteria:
+            self._apply_criteria()
+        else:
+            self._apply_records()
+
+    # ---- 기록 보기 ----
+    def _apply_records(self, *_):
+        rows = fi.filter_records(self._all, self.ed_search.text(), self.dp_from.value(), self.dp_to.value())
+        self.grid.set_items(rows)
+        if not self._criteria_mode:
+            self.summary.setText(fi.records_summary(rows))
+
+    def _quick(self, tag: str):
+        start, end = fi.quick_range(tag, self._today)
+        self.dp_from.set_value(start)
+        self.dp_to.set_value(end)
+        self._apply_records()
+
+    # ---- 월간 기준 확인 ----
+    def _fill_months(self):
+        current = self.cmb_month.currentText()
+        months = fi.criteria_months(self._all, self._today)
+        self.cmb_month.blockSignals(True)
+        self.cmb_month.clear()
+        self.cmb_month.addItems(months)
+        self.cmb_month.setCurrentText(current if current in months else months[0])
+        self.cmb_month.blockSignals(False)
+
+    def _apply_criteria(self, *_):
+        if not self._criteria_mode:
+            return
+        month_text = self.cmb_month.currentText()
+        if not month_text:
+            return
+        year, month = int(month_text[:4]), int(month_text[5:7])
+        weeks = fi.weeks_of_month(year, month)
+        all_rows = fi.evaluate_month(self._all, year, month, self._today)
+        kw = self.ed_criteria.text().strip().lower()
+        wanted = {1: fi.PASSED, 2: fi.FAILED, 3: fi.IN_PROGRESS}.get(self.cmb_result.currentIndex())
+        rows = [r for r in all_rows
+                if (not kw or kw in r.student_id.lower() or kw in r.name.lower())
+                and (wanted is None or r.state == wanted)]
+
+        cols = [w.Col("학번", 95, text=lambda r: r.student_id), w.Col("이름", 75, text=lambda r: r.name)]
+        for i, (start, end) in enumerate(weeks):
+            cols.append(w.Col(f"{i + 1}주차\n{start.month}-{start.day}~{end.month}-{end.day}", stretch=True, min_width=95,
+                              text=lambda r, idx=i: r.weeks[idx].text))
+        cols.append(w.Col("결과", 130, text=lambda r: r.result_text))
+        if self.grid_criteria is not None:
+            self.criteria_lay.removeWidget(self.grid_criteria)
+            self.grid_criteria.deleteLater()
+        self.grid_criteria = w.DataGrid(cols, row_height=35, header_height=38)
+        self.grid_criteria.cell_font.setFamilies(["Segoe UI", "Malgun Gothic", theme.ICON_FONT, "Segoe UI Symbol"])
+        self.grid_criteria.set_items(rows)
+        self.criteria_lay.addWidget(self.grid_criteria)
+        self.summary.setText(fi.criteria_summary(month_text, all_rows, len(rows)))
+
+
+def _filter_caption(text: str) -> QLabel:
+    return w.label(text, 12, weight=600, color="#374151")
+
+
+def _filter_input(on_change: Callable) -> QLineEdit:
+    ed = QLineEdit()
+    ed.setFixedWidth(130)
+    ed.setStyleSheet("QLineEdit { padding:4px; }")
+    ed.textChanged.connect(on_change)
+    return ed
+
+
+class _OptionalDate(QDateEdit):
+    """WPF DatePicker처럼 날짜를 비워 둘 수 있는 입력칸 — 비어 있으면 그 쪽 기간을 따지지 않는다."""
+
+    _EMPTY = QDate(2000, 1, 1)
+
+    def __init__(self, on_change: Callable):
+        super().__init__()
+        self.setCalendarPopup(True)
+        self.setFixedWidth(120)
+        self.setMinimumDate(self._EMPTY)
+        self.setSpecialValueText("날짜 선택")
+        self.setDisplayFormat("yyyy-MM-dd")
+        self.setDate(self._EMPTY)
+        self.dateChanged.connect(on_change)
+
+    def value(self) -> Optional[datetime.date]:
+        return None if self.date() == self._EMPTY else self.date().toPython()
+
+    def set_value(self, d: Optional[datetime.date]):
+        self.blockSignals(True)
+        self.setDate(_qdate(d) if d else self._EMPTY)
+        self.blockSignals(False)
 
 
 class StudentSelectorModal(w.OverlayDialog):

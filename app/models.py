@@ -194,13 +194,15 @@ class RentalItem:
     phone: str = "010-0000-0000"
     advisor: str = "김동욱 교수"
     return_date: Optional[datetime.date] = None
+    source_key: str = ""  # 중복 동기화 방지용 키
 
     @property
     def due_date(self) -> datetime.date:
         return self.rental_date + datetime.timedelta(days=self.rental_period_days)
 
     def is_overdue(self, today: datetime.date) -> bool:
-        return not self.is_returned and self.due_date < today
+        # C#은 DueDate(그날 0시)를 지금 시각과 비교한다 — 반납 예정일 당일부터 연체로 표시된다
+        return self.due_date <= today
 
     def is_warning(self, today: datetime.date) -> bool:
         return not self.is_returned and not self.is_overdue(today) and (self.due_date - today).days <= 7
@@ -238,6 +240,7 @@ class RentalItem:
             "Phone": self.phone,
             "Advisor": self.advisor,
             "ReturnDate": self.return_date.isoformat() if self.return_date else None,
+            "SourceKey": self.source_key,
         }
 
     @staticmethod
@@ -263,6 +266,7 @@ class RentalItem:
             phone=d.get("Phone", ""),
             advisor=d.get("Advisor", ""),
             return_date=pdate(d.get("ReturnDate")),
+            source_key=d.get("SourceKey", ""),
         )
 
 

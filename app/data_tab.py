@@ -101,6 +101,24 @@ class DataManageTab(QWidget):
         pl.addWidget(w.flat_btn("변경 사항 저장", "#10B981", padding=(8, 0), radius=0, on_click=self.save_selected))
         pl.addSpacing(8)
         pl.addWidget(w.flat_btn("마스터에서 삭제", "#EF4444", padding=(8, 0), radius=0, on_click=self.delete_selected))
+
+        # 이 학생의 얼굴인식 출결 기록 (attendance.json, 학번으로 연결)
+        pl.addSpacing(22)
+        pl.addWidget(w.label("얼굴인식 출석", 14, bold=True, color="#374151"))
+        pl.addSpacing(6)
+        self.lbl_face_summary = w.label("", 11, color="#4B5563", wrap=True)
+        pl.addWidget(self.lbl_face_summary)
+        pl.addSpacing(8)
+        self.grid_face = w.DataGrid([
+            w.Col("날짜", 80, text=lambda r: r.date),
+            w.Col("출근", 60, text=lambda r: r.check_in or ""),
+            w.Col("퇴근", 60, text=lambda r: r.check_out or ""),
+            w.Col("근무", stretch=True, text=lambda r: r.work_time_text),
+        ], row_height=28, font_size=11)
+        box = w.Card(bg="#FFFFFF", border="#E5E7EB", radius=0, padding=0)
+        box.vbox().addWidget(self.grid_face)
+        box.setFixedHeight(220)
+        pl.addWidget(box)
         pl.addStretch()
         self.panel.setEnabled(False)
         scroll.setWidget(self.panel)
@@ -133,6 +151,7 @@ class DataManageTab(QWidget):
     def _on_selected(self, student: Optional[StudentInfo]):
         if student is None:
             self.panel.setEnabled(False)
+            self._show_face_attendance(None)
             return
         self.selected = student
         self.ed_id.setText(student.student_id)
@@ -142,6 +161,18 @@ class DataManageTab(QWidget):
         self.ed_contact.setText(student.contact)
         self.ed_email.setText(student.email)
         self.panel.setEnabled(True)
+        self._show_face_attendance(student)
+
+    def _show_face_attendance(self, student: Optional[StudentInfo]):
+        """학생 상세 — 그 학생(학번)의 얼굴인식 출결 기록과 합계를 보여준다."""
+        if student is None or not student.student_id.strip():
+            self.grid_face.set_items([])
+            self.lbl_face_summary.setText("")
+            return
+        records = face_integration.sort_latest_first(
+            r for r in face_integration.load_attendance() if r.student_id == student.student_id)
+        self.grid_face.set_items(records)
+        self.lbl_face_summary.setText(face_integration.student_summary(records, self.ctx.today))
 
     # ------------------------------------------------------------------ 동작
     def save_selected(self):
@@ -203,7 +234,7 @@ class DataManageTab(QWidget):
 
     def show_face_attendance(self):
         from .dialogs import FaceAttendanceModal
-        FaceAttendanceModal(self, face_integration.load_attendance, config.attendance_path()).exec()
+        FaceAttendanceModal(self, face_integration.load_attendance, config.attendance_path(), self.ctx.today).exec()
 
     def import_excel(self):
         path, _ = QFileDialog.getOpenFileName(self, "마스터 학생 데이터베이스 가져오기", "",

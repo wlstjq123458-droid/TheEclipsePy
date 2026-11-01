@@ -12,8 +12,9 @@ APP_DIR_NAME = "SeatManagerApp-Python"
 
 
 def config_dir() -> str:
-    base = os.environ.get("APPDATA") or os.path.expanduser("~")
-    path = os.path.join(base, APP_DIR_NAME)
+    # 웹 서버는 SEATMANAGER_DATA_DIR로 자기 데이터 폴더를 따로 지정한다
+    path = os.environ.get("SEATMANAGER_DATA_DIR") or os.path.join(
+        os.environ.get("APPDATA") or os.path.expanduser("~"), APP_DIR_NAME)
     os.makedirs(path, exist_ok=True)
     return path
 
@@ -42,8 +43,8 @@ def face_integration_dir() -> str:
     """얼굴인식 프로그램(insightface-attendance)과 주고받는 파일 위치.
     C# 버전과 똑같이 %USERPROFILE%\\SeatManagerApp\\face-integration 을 쓴다 —
     같은 컴퓨터에서 두 프로그램(C#/Python 중 어느 쪽이든)과 얼굴인식 프로그램이 이 폴더로 통신하게 하기 위해서다."""
-    base = os.path.expanduser("~")
-    path = os.path.join(base, "SeatManagerApp", "face-integration")
+    path = os.environ.get("SEATMANAGER_FACE_DIR") or os.path.join(
+        os.path.expanduser("~"), "SeatManagerApp", "face-integration")
     os.makedirs(path, exist_ok=True)
     return path
 

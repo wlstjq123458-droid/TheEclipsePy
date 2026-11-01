@@ -732,6 +732,7 @@ class CabinetTab(QWidget):
 
     def import_excel(self):
         from . import io_import as ioimp
+        from .logic import parse_cabinet_rows
         path, _ = QFileDialog.getOpenFileName(self, "캐비닛 배정 현황 엑셀 가져오기", "", "Excel Files (*.xlsx);;All Files (*.*)")
         if not path:
             return
@@ -739,22 +740,7 @@ class CabinetTab(QWidget):
             table = ioimp.read_table(path)
             allocs = self.ctx.state.cabinet_allocations
             count = 0
-            for v in table:
-                if len(v) < 2:
-                    continue
-                c0 = ioimp.cell_str(v[0])
-                if c0 in ("CabinetNumber", "캐비닛번호") or not c0:
-                    continue
-                try:
-                    num = int(float(c0))
-                except ValueError:
-                    continue
-                if num <= 0 or num > 48:
-                    continue
-                sid = ioimp.cell_str(ioimp.cell_at(v, 1))
-                name = ioimp.cell_str(ioimp.cell_at(v, 2))
-                dept = ioimp.cell_str(ioimp.cell_at(v, 3)) if len(v) > 3 else "소프트웨어융합학과"
-                period = ioimp.cell_str(ioimp.cell_at(v, 4)) if len(v) > 4 else self.ctx.default_cabinet_period
+            for num, sid, name, dept, period in parse_cabinet_rows(table, self.ctx.default_cabinet_period):
                 dup = next((n for n, a in allocs.items() if a.student and a.student.student_id == sid and n != num), 0)
                 if dup:
                     del allocs[dup]

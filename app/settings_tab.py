@@ -125,7 +125,7 @@ class SettingsTab(QWidget):
         c.addSpacing(10)
         c.addWidget(w.label("프로그램명: 동서대학교 좌석 및 기자재 대여 관리 프로그램"))
         c.addSpacing(5)
-        c.addWidget(w.label("버전: v1.0.0"))
+        c.addWidget(w.label("버전: v1.1.0"))
         c.addSpacing(5)
         c.addWidget(w.label("플랫폼: Python 3 / PySide6 (Qt) Application"))
         c.addSpacing(15)
@@ -499,7 +499,7 @@ class SettingsTab(QWidget):
         sizes = {"기본 (1600 x 900)": (1600, 900), "소형 (1024 x 768)": (1024, 768),
                  "중형 (1200 x 780)": (1200, 780), "대형 (1920 x 1080)": (1920, 1080)}
         if text in sizes:
-            self.ctx.win.resize(*sizes[text])
+            self.ctx.win.fit_to_screen_and_center(*sizes[text])
 
 
 def _describe(label: str, entered: str, sheet_id: str) -> Optional[str]:

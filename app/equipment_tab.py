@@ -7,11 +7,10 @@ Section 2: 기자재 대여 현황 — 본체(HP Z2 G9) | 노트북(HP OMEN)
 """
 from __future__ import annotations
 
-import datetime
 import os
 import shutil
 import sys
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
@@ -19,15 +18,13 @@ from PySide6.QtWidgets import (
 )
 
 from . import widgets as w
-from . import io_import as ioimp
 from . import approval_logic as al
+from .logic import TEMPLATE_NAME, import_rentals
 from .constants import TOTAL_MAINFRAME, TOTAL_LAPTOP, MAINFRAME_LABEL, LAPTOP_LABEL
 from .models import RentalItem, EquipmentIssue, ApprovalRequest
 
 if TYPE_CHECKING:  # pragma: no cover
     from .context import AppContext
-
-TEMPLATE_NAME = "2026-여름방학_기자제 (노트북(HP OMEN 게이밍 노트북) 대여 현황서양식.xlsx"
 
 
 def _section(text: str) -> QLabel:
@@ -368,79 +365,3 @@ class EquipmentTab(QWidget):
         self.ctx.save_app_state()
         skip = f"\n(다른 기자재 종류 {skipped}건은 건너뛰었습니다.)" if skipped else ""
         w.info(self, f"파일로부터 {len(imported)}건의 기자재 대여 내역을 추가했습니다.{skip}", "가져오기 성공")
-
-
-def _parse_date(s: str) -> Optional[datetime.date]:
-    if not s:
-        return None
-    s = s.strip()
-    try:
-        return datetime.datetime.fromisoformat(s).date()
-    except ValueError:
-        pass
-    head = s.split(" ")[0]
-    for fmt in ("%Y-%m-%d", "%Y.%m.%d", "%Y/%m/%d", "%y.%m.%d"):
-        try:
-            return datetime.datetime.strptime(head, fmt).date()
-        except ValueError:
-            continue
-    return None
-
-
-def import_rentals(path: str, target_label: str, is_mainframe: bool, today: datetime.date):
-    """대여 현황 엑셀/CSV — 이 프로그램이 추출한 양식과 '이름·학과·학년…' 현황표 양식을 모두 읽는다."""
-    table = ioimp.read_table(path)
-    header_row = -1
-    for i in range(min(len(table), 10)):
-        texts = [ioimp.cell_str(c) for c in table[i]]
-        if any("학번" in t for t in texts) and any(("성명" in t or "이름" in t) for t in texts):
-            header_row = i
-            break
-    if header_row < 0:
-        raise ValueError("학번·성명(이름) 열을 찾지 못했습니다. 대여 현황 양식의 엑셀/CSV 파일인지 확인해주세요.")
-    header = [ioimp.cell_str(c) for c in table[header_row]]
-    f = ioimp.find_col
-    c_id, c_name = f(header, "학번"), f(header, "성명", "이름")
-    c_dept, c_level = f(header, "전공", "학과", "소속"), f(header, "학년")
-    c_phone, c_adv = f(header, "연락처", "전화"), f(header, "지도교수")
-    c_equip, c_unit = f(header, "대여품목", "품목", "기자재"), f(header, "품목번호", "개체번호")
-    c_qty, c_extra = f(header, "수량"), f(header, "추가 대여물품")
-    c_loc, c_purpose, c_rem = f(header, "사용장소"), f(header, "사용목적"), f(header, "특이사항")
-    c_rent, c_due, c_ret = f(header, "대여일", "대여날짜"), f(header, "반납예정"), f(header, "반납일")
-    if c_ret == c_due:
-        c_ret = -1
-
-    imported, skipped = [], 0
-    for row in table[header_row + 1:]:
-        def cell(i):
-            return ioimp.cell_str(ioimp.cell_at(row, i))
-        sid = ioimp.normalize_student_id(ioimp.cell_at(row, c_id))
-        name = cell(c_name)
-        if not sid or not any(ch.isdigit() for ch in sid) or not name:
-            continue
-        equip = cell(c_equip)
-        if equip and ("노트북" in equip) == is_mainframe:
-            skipped += 1
-            continue
-        level = cell(c_level)
-        if level.replace(".0", "").isdigit():
-            level = level.replace(".0", "") + "학년"
-        qty_t = cell(c_qty).replace(".0", "")
-        rental_date = _parse_date(cell(c_rent)) or today
-        due = _parse_date(cell(c_due))
-        period = (due - rental_date).days if due else 7
-        if period <= 0:
-            period = 7
-        ret = _parse_date(cell(c_ret)) if c_ret >= 0 else None
-        unit = cell(c_unit).replace(".0", "")
-        equip_type = f"{target_label} (No. {unit})" if unit.isdigit() else target_label
-        imported.append(RentalItem(
-            student_id=sid, student_name=name, department=cell(c_dept), year_level=level,
-            phone=ioimp.normalize_phone(ioimp.cell_at(row, c_phone)),
-            advisor=cell(c_adv).replace("교수님", "").replace("교수", "").strip(),
-            equipment_type=equip_type, quantity=int(qty_t) if qty_t.isdigit() else 1,
-            extra_items=cell(c_extra), location=cell(c_loc) or "DSU 창의공간",
-            purpose=cell(c_purpose) or "개인 실습", remarks=cell(c_rem),
-            rental_date=rental_date, rental_period_days=period, return_date=ret, is_returned=ret is not None,
-        ))
-    return imported, skipped

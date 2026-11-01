@@ -17,48 +17,14 @@ from PySide6.QtWidgets import (
 )
 
 from . import theme, widgets as w
-from . import io_import as ioimp
 from .config import SEASON_NAMES
+from .logic import POSITIONS, COORDS, mask_student_id, mask_name, parse_sangsanglab_responses
 from .models import Seat, StudentInfo, MemoItem
 
 if TYPE_CHECKING:  # pragma: no cover
     from .context import AppContext
 
 MIME_SEAT = "application/x-seatmanager-seat"
-
-# (좌석번호, 행, 열, 열 병합, 회색 줄) — C# RenderSeatGrid의 positions 그대로 (-1 = 기둥)
-POSITIONS = [
-    (1, 0, 0, 1, False), (2, 0, 1, 1, False), (3, 0, 2, 1, False), (4, 0, 4, 1, False), (5, 0, 5, 1, False), (6, 0, 6, 1, False),
-    (7, 1, 0, 1, False), (8, 1, 1, 1, False), (9, 1, 2, 1, False), (10, 1, 4, 1, False), (11, 1, 5, 1, False), (12, 1, 6, 1, False),
-    (13, 2, 0, 1, False), (14, 2, 1, 1, False), (15, 2, 2, 1, False), (16, 2, 4, 1, False), (17, 2, 5, 1, False), (18, 2, 6, 1, False),
-    (19, 3, 0, 1, False), (20, 3, 1, 1, False), (21, 3, 2, 1, False), (22, 3, 4, 1, False), (23, 3, 5, 1, False), (-1, 3, 6, 2, False),
-    (24, 4, 0, 1, False), (25, 4, 1, 1, False), (26, 4, 2, 1, False), (27, 4, 4, 1, False), (28, 4, 5, 1, False),
-    (29, 5, 0, 1, False), (30, 5, 1, 1, False), (31, 5, 2, 1, False), (32, 5, 4, 1, False), (33, 5, 5, 1, False), (34, 5, 6, 1, False), (35, 5, 7, 1, False),
-    (36, 6, 0, 1, False), (37, 6, 1, 1, False), (38, 6, 2, 1, False), (39, 6, 4, 1, False), (40, 6, 5, 1, False), (41, 6, 6, 1, False), (42, 6, 7, 1, False),
-    (43, 7, 0, 1, True), (44, 7, 1, 1, True), (45, 7, 4, 1, True), (46, 7, 5, 1, True), (47, 7, 6, 1, True),
-    (48, 8, 0, 1, True), (49, 8, 1, 1, True), (50, 8, 4, 1, True), (51, 8, 5, 1, True), (52, 8, 6, 1, True),
-]
-COORDS = {n: (r, c) for n, r, c, _span, _g in POSITIONS if n > 0}
-
-
-def mask_student_id(sid: str) -> str:
-    if not sid:
-        return sid
-    if len(sid) == 8:
-        return sid[:2] + "****" + sid[6:]
-    if len(sid) <= 2:
-        return sid
-    hide = min(4, len(sid) - 2)
-    start = (len(sid) - hide) // 2
-    return sid[:start] + "*" * hide + sid[start + hide:]
-
-
-def mask_name(name: str) -> str:
-    if not name or len(name) < 2:
-        return name
-    mid = len(name) // 2
-    return name[:mid] + "*" + name[mid + 1:]
-
 
 def _font(px: int, bold: bool = False, family: str = "Segoe UI") -> QFont:
     f = QFont(family)
@@ -920,34 +886,6 @@ class SeatTab(QWidget):
         leftover = f"\n\n좌석 수보다 {len(queue)}명이 많아 배치되지 못했습니다." if queue else ""
         master_msg = f"\n학생 데이터: 신규 {added}명 추가" + (f", {updated}명 정보 보완" if updated else "")
         w.info(self, f"{season_label} 좌석에 {placed}명을 배치했습니다.{master_msg}{leftover}", "불러오기 완료")
-
-
-def parse_sangsanglab_responses(path: str) -> list[StudentInfo]:
-    """상상Labs 입실신청 응답 파일 (A 타임스탬프 / B 신청공간 / C 소속 / D 이름 / E 학번 / F 연락처 / G 이메일 / H 지도교수)."""
-    table = ioimp.read_table(path)
-    result: list[StudentInfo] = []
-    seen: set[str] = set()
-    for v in table:
-        def cell(i):
-            return ioimp.cell_str(ioimp.cell_at(v, i))
-        space, dept, name, id_raw = cell(1), cell(2), cell(3), cell(4)
-        contact = ioimp.normalize_phone(ioimp.cell_at(v, 5))
-        email, advisor = cell(6), cell(7)
-        if "이름을 작성" in name or "소속을 작성" in dept or "학번" in id_raw or "공간을 선택" in space:
-            continue
-        sid = ioimp.normalize_student_id(ioimp.cell_at(v, 4))
-        if not name.strip() and not sid.strip():
-            continue
-        if space and "상상" not in space and "U301" not in space:
-            continue
-        if sid:
-            if sid in seen:
-                continue
-            seen.add(sid)
-        advisor = advisor.replace("교수님", "").replace("교수", "").strip()
-        result.append(StudentInfo(student_id=sid, name=name, department=dept.strip() or "소프트웨어전공",
-                                  email=email, contact=contact, advisor=advisor))
-    return result
 
 
 def _margin(widget: QWidget, left=0, top=0, right=0, bottom=0) -> QWidget:

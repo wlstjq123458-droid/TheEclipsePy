@@ -7,12 +7,13 @@ import datetime
 
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (
-    QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QStackedWidget, QButtonGroup,
+    QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QStackedWidget, QButtonGroup,
 )
 
 from . import theme, widgets as w
 from . import approval_logic as al
 from . import google_integration as gi
+from . import face_integration
 from .context import AppContext
 from .seat_tab import SeatTab
 from .equipment_tab import EquipmentTab
@@ -42,6 +43,10 @@ QPushButton#side:checked {{ background: #2563EB; color: #FFFFFF; border-left: 4p
 """
 
 
+# 창의 최소 크기 — 화면이 이보다 작으면 화면 크기까지만 내려 쓴다
+DESIGN_MIN_SIZE = (1100, 720)
+
+
 class MainWindow(QMainWindow):
     def __init__(self, ctx: AppContext):
         super().__init__()
@@ -51,8 +56,8 @@ class MainWindow(QMainWindow):
         self.is_syncing = False
         self.current = "dashboard"
         self.setWindowTitle("동서대학교 좌석 및 기자재 관리 시스템")
-        self.resize(1600, 900)
-        self.setMinimumSize(1100, 720)
+        self.setMinimumSize(*DESIGN_MIN_SIZE)
+        self.fit_to_screen_and_center(1600, 900)
 
         self._build_ui()
 
@@ -67,10 +72,31 @@ class MainWindow(QMainWindow):
         self.update_alert_badges()
         self.detect_and_apply_current_season(initial=True)
         ctx.migrate_students_without_season()
+        # 얼굴인식 출결 시스템이 처음부터 최신 명단을 읽어갈 수 있도록 시작할 때도 한 번 내보낸다
+        face_integration.export_roster(ctx.state.master_students)
         self.data.refresh_table()
         self.dashboard.refresh_memos()
         self.settings_tab.load_season_settings_ui()
         QTimer.singleShot(0, self._init_google_form_sync)
+
+    def fit_to_screen_and_center(self, width: int, height: int):
+        """
+        창을 화면의 작업 영역(작업 표시줄 제외) 안에 들어가게 줄이고 정중앙에 놓는다.
+        화면이 창보다 작거나(노트북) 디스플레이 배율이 크면(125%·150%) 그냥 가운데에 놓을 경우
+        창이 화면보다 커서 제목 표시줄이 화면 위로 나가 버리고, 끌어서 옮길 수도 없게 된다.
+        """
+        if self.isMaximized() or self.isMinimized():
+            self.showNormal()
+        screen = self.screen() or QApplication.primaryScreen()
+        area = screen.availableGeometry()
+        frame_w = max(0, self.frameGeometry().width() - self.geometry().width())
+        frame_h = max(0, self.frameGeometry().height() - self.geometry().height())
+        max_w, max_h = area.width() - frame_w, area.height() - frame_h
+        # 최소 크기가 화면보다 크면 그 이하로 줄일 수 없으므로 최소 크기도 화면에 맞춘다
+        self.setMinimumSize(min(DESIGN_MIN_SIZE[0], max_w), min(DESIGN_MIN_SIZE[1], max_h))
+        self.resize(min(width, max_w), min(height, max_h))
+        self.move(area.left() + (area.width() - self.width() - frame_w) // 2,
+                  area.top() + (area.height() - self.height() - frame_h) // 2)
 
     # ------------------------------------------------------------------ 틀
     def _build_ui(self):
