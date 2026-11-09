@@ -346,6 +346,7 @@ class ApprovalRequest:
     purpose: str = ""
     due_date: Optional[datetime.date] = None
     source_key: str = ""  # 구글 폼 응답 1건의 고유 키(중복 등록 방지)
+    sheet_reject_reason: str = ""  # 시트의 '반려사유' 칸 — 동기화할 때만 쓰고 저장하지 않는다
 
     def to_dict(self) -> dict:
         return {

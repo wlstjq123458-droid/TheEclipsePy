@@ -141,6 +141,7 @@ class ColumnMap:
         self.due_date = f("반납예정일", "반납예정", "반납")
         self.rental_period = f("대여기간", "신청기간", "사용기간", "기간")
         self.approval_status = f("승인상태", "승인여부", "승인", "상태")
+        self.reject_reason = f("반려사유")
 
         # "원하는 공간" 질문의 보기 안에 '기자재'가 들어 있으면 같은 열이 잡힌다 — 떼어낸다
         if self.equipment >= 0 and self.equipment == self.space:
@@ -260,7 +261,9 @@ class GoogleFormsService:
                 result.error = "스프레드시트에 시트가 없습니다."
                 return
             tab_name = sheets[0]["properties"]["title"]
-            resp = service.spreadsheets().values().get(spreadsheetId=sheet_id, range=f"'{tab_name}'!A:Z").execute()
+            # 열 범위를 정하지 않고 시트 전체를 읽는다 — 승인 스크립트가 폼 질문 오른쪽에 붙이는 칸까지 읽어야 한다
+            quoted = tab_name.replace("'", "''")
+            resp = service.spreadsheets().values().get(spreadsheetId=sheet_id, range=f"'{quoted}'").execute()
             rows = resp.get("values") or []
             if not rows:
                 result.error = "시트가 비어 있습니다."
@@ -317,6 +320,7 @@ class GoogleFormsService:
                     source_key=source_key,
                     status="승인 대기",
                     sheet_approval_status=g(row, cmap.approval_status) if cmap.approval_status >= 0 else "",
+                    sheet_reject_reason=g(row, cmap.reject_reason),
                 ))
         except Exception as ex:  # noqa: BLE001
             status = getattr(getattr(ex, "resp", None), "status", None)

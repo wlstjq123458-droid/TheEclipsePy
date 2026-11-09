@@ -245,11 +245,6 @@ def prefer(incoming: str, current: str) -> str:
     return current if not (incoming or "").strip() else incoming
 
 
-def is_approved_on_sheet(status: str) -> bool:
-    s = (status or "").strip()
-    return s in ("승인", "승인 완료", "승인완료", "승인함") or s.upper() in ("O", "Y")
-
-
 def _add_months(d: datetime.date, n: int) -> datetime.date:
     import calendar
     m = d.month - 1 + n

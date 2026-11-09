@@ -141,6 +141,8 @@ export function createSettings(app) {
   const keyPath = h('input', { type: 'text', class: 'small-ro', readOnly: true, style: { flex: 1 } });
   const polling = h('input', { type: 'checkbox' });
   const interval = h('input', { type: 'text', style: { width: '70px', height: '28px', padding: '0 8px', borderColor: '#D1D5DB' } });
+  const approvalBoxes = h('div', { class: 'row', style: { gap: '14px', margin: '4px 0 12px' } });
+  let approvalChecks = [];
   const status = h('div', { style: { fontSize: '11px', whiteSpace: 'pre-line', marginTop: '10px' } });
   const years = h('div', { class: 'year-cards' });
   const editor = h('div', { class: 'box', style: { background: '#fff', borderColor: '#E5E7EB' } });
@@ -175,6 +177,8 @@ export function createSettings(app) {
         h('div', { class: 'row', style: { gap: '8px' } }, keyPath, actionBtn('키 파일 선택...', pickKey, { icon: 'folder', cls: 'mid' })),
         h('div', { class: 'row', style: { margin: '12px 0' } }, h('label', null, polling, ' 자동 동기화'), h('span', { style: { width: '20px' } }),
           h('span', { style: { color: '#6B7280', marginRight: '6px' } }, '주기(초):'), interval),
+        h('div', { class: 'fld', style: { marginTop: '0' } }, "지도교수 승인을 거친 신청만 받기 — 시트의 '승인상태'가 \"승인\"인 행만 들어오고, \"반려\"는 승인/반려 내역에 기록됩니다"),
+        approvalBoxes,
         h('div', { class: 'row', style: { gap: '10px' } }, actionBtn('지금 동기화', syncNow, { icon: 'refresh' }), actionBtn('연동 설정 저장', saveSync, { icon: 'save' })),
         status),
 
@@ -213,7 +217,8 @@ export function createSettings(app) {
 
   async function saveSync() {
     await put('/api/settings/sync', { sangsangLabFormUrl: main.value, cabinetFormUrl: cabinet.value, equipmentFormUrl: equipment.value,
-      pollingEnabled: polling.checked, pollingIntervalSeconds: interval.value });
+      pollingEnabled: polling.checked, pollingIntervalSeconds: interval.value,
+      approvalTypes: approvalChecks.filter(([, cb]) => cb.checked).map(([t]) => t) });
     await refresh();
   }
 
@@ -274,6 +279,8 @@ export function createSettings(app) {
       equipment.value = info.equipmentFormUrl;
       interval.value = info.pollingIntervalSeconds;
       polling.checked = info.pollingEnabled;
+      approvalChecks = info.allApprovalTypes.map((t) => [t, h('input', { type: 'checkbox', checked: info.approvalTypes.includes(t) })]);
+      clear(approvalBoxes, approvalChecks.map(([t, cb]) => h('label', null, cb, ` ${t}`)));
     }
     email.value = info.serviceAccountEmail;
     keyPath.value = info.keyPath;

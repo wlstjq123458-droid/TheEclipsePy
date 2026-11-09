@@ -23,11 +23,11 @@ import threading
 import time
 from typing import Iterable, Optional
 
-from app import config, face_integration as fi, google_integration as gi, io_import as ioimp, storage
+from app import config, face_integration as fi, google_integration as gi, io_import as ioimp, storage, sync_merge
 from app.constants import (
     LAPTOP_LABEL, MAINFRAME_LABEL, TOTAL_CABINETS, TOTAL_LAPTOP, TOTAL_MAINFRAME, format_period,
 )
-from app.context import AppContext, is_approved_on_sheet, prefer
+from app.context import AppContext, prefer
 from app.logic import COORDS, POSITIONS, TEMPLATE_NAME, import_rentals, parse_cabinet_rows, parse_sangsanglab_responses
 from app.models import (
     ApprovalRequest, CabinetAllocation, EquipmentIssue, MemoItem, RentalItem, SEASON_NAMES, Seat, SeasonPeriod,
@@ -1253,62 +1253,14 @@ class Service:
             self._syncing.release()
 
     def _merge_sync(self, result, now: str, silent: bool) -> dict:
-        ctx, st = self.ctx, self.ctx.state
-        auto_rejected, equipment_pending = [], 0
-        for req in result.new_requests:
-            if req.source_key in st.imported_source_keys:
-                continue   # 시트를 읽는 사이 다른 동기화가 이미 받아 왔다
-            if not req.student_name.strip():
-                req.student_name = (
-                    next((m.name for m in st.master_students if m.student_id == req.student_id), None)
-                    or next((a.student_name for a in st.approvals if a.student_id == req.student_id and a.student_name.strip()), None)
-                    or ""
-                )
-            if req.tab_type == "기자재":
-                if is_approved_on_sheet(req.sheet_approval_status):
-                    st.imported_source_keys.add(req.source_key)
-                    st.approvals.append(req)
-                else:
-                    equipment_pending += 1
-                continue
-            st.imported_source_keys.add(req.source_key)
-            if req.tab_type == "캐비닛":
-                if not req.rental_period.strip():
-                    req.rental_period = ctx.default_cabinet_period
-                reason = ctx.find_cabinet_conflict(req)
-                if reason:
-                    req.status = "반려"
-                    req.note = reason if not req.note.strip() else f"{req.note} / {reason}"
-                    st.approval_history.append(req)
-                    auto_rejected.append(req)
-                    continue
-            st.approvals.append(req)
-        if result.new_requests:
+        merged = sync_merge.merge_new_requests(self.ctx, result.new_requests)
+        if merged.added or merged.professor_rejected or merged.auto_rejected:
             self._commit()
-
-        added = len(result.new_requests) - equipment_pending
-        summary = f"[{now}] 응답 {result.total_rows}건 중 신규 {added}건 반영"
-        if result.duplicate_count:
-            summary += f" (기존 {result.duplicate_count}건 건너뜀)"
-        if equipment_pending:
-            summary += f" (기자재 시트 승인 대기 {equipment_pending}건 — 다음 동기화 때 재확인)"
-        by_type: dict[str, int] = {}
-        for a in st.approvals:
-            by_type[a.tab_type] = by_type.get(a.tab_type, 0) + 1
-        summary += "\n승인 대기: " + (" / ".join(f"{k} {v}건" for k, v in by_type.items()) if by_type else "없음")
-        if result.missing_columns:
-            summary += f"\n⚠ 헤더에서 찾지 못한 항목: {', '.join(result.missing_columns)}"
-        if result.unmapped_spaces:
-            summary += f"\n⚠ 신청 공간을 판별하지 못한 값: {' / '.join(result.unmapped_spaces)} → '미분류'로 등록됨"
-        for warning in result.warnings:
-            summary += f"\n⚠ {warning}"
-        self.sync_status = (summary, bool(result.missing_columns or result.unmapped_spaces or result.warnings))
-
-        if auto_rejected:
-            lines = "\n".join(f"• {r.student_name} ({r.student_id}) — {r.rental_period}" for r in auto_rejected)
+        summary, warning = sync_merge.sync_summary(now, result, merged, self.ctx.state.approvals)
+        self.sync_status = (summary, warning)
+        if merged.auto_rejected:
             self.notice = {"id": time.time_ns(), "title": "배정 중복 오류", "level": "warning",
-                           "message": f"아래 {len(auto_rejected)}건은 캐비닛 배정 기간이 중복되어 자동으로 반려 처리되었습니다.\n\n{lines}\n\n"
-                                      "[📋 승인/반려 내역]에서 확인하거나 복구할 수 있습니다."}
+                           "message": sync_merge.auto_rejected_message(merged.auto_rejected)}
         return {"message": summary, "title": "동기화 완료"} if not silent else {}
 
     def _read_key_email(self) -> str:
@@ -1331,6 +1283,7 @@ class Service:
             "sangsangLabFormUrl": s.get("SangsangLabFormUrl", ""), "cabinetFormUrl": s.get("CabinetFormUrl", ""),
             "equipmentFormUrl": s.get("EquipmentFormUrl", ""), "pollingEnabled": bool(s.get("PollingEnabled", True)),
             "pollingIntervalSeconds": s.get("PollingIntervalSeconds", 60),
+            "approvalTypes": sync_merge.approval_types(s), "allApprovalTypes": list(sync_merge.APPROVAL_TYPES),
             "serviceAccountEmail": self._read_key_email(),
             "keyPath": path if os.path.exists(path) else f"(없음) {path}",
             "syncStatus": self.sync_status[0], "syncWarning": self.sync_status[1],
@@ -1361,6 +1314,7 @@ class Service:
         s["PollingEnabled"] = bool(body.get("pollingEnabled"))
         s["SangsangLabFormUrl"], s["CabinetFormUrl"], s["EquipmentFormUrl"] = main_url, cab_url, eq_url
         s["PollingIntervalSeconds"] = sec
+        s["ProfessorApprovalTypes"] = [t for t in sync_merge.APPROVAL_TYPES if t in (body.get("approvalTypes") or [])]
         self.ctx.save_settings()
         notes = [n for n in (_describe_sheet("캐비닛", cab_url, cab_id), _describe_sheet("기자재", eq_url, eq_id)) if n]
         msg = f"연동 설정을 저장했습니다. (메인 시트 ID: {main_id})"

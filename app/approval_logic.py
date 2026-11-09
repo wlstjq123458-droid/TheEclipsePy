@@ -10,7 +10,8 @@ from typing import TYPE_CHECKING
 
 from . import widgets as w
 from .constants import TOTAL_CABINETS
-from .context import prefer, is_approved_on_sheet
+from . import sync_merge
+from .context import prefer
 from .dialogs import (
     EquipmentSelectionDialog, CabinetSelectionDialog, ExpiredCleanupDialog,
     cabinet_expiry_warning, equipment_expiry_warning,
@@ -184,62 +185,16 @@ def sync_from_google_form(ctx: "AppContext", silent: bool) -> None:
                 w.error(win, result.error, "동기화 실패")
             return
 
-        auto_rejected = []
-        equipment_pending_on_sheet = 0
-        for req in result.new_requests:
-            if not req.student_name.strip():
-                req.student_name = (
-                    next((m.name for m in st.master_students if m.student_id == req.student_id), None)
-                    or next((a.student_name for a in st.approvals if a.student_id == req.student_id and a.student_name.strip()), None)
-                    or ""
-                )
-            if req.tab_type == "기자재":
-                if is_approved_on_sheet(req.sheet_approval_status):
-                    st.imported_source_keys.add(req.source_key)
-                    st.approvals.append(req)
-                else:
-                    equipment_pending_on_sheet += 1
-                continue
-
-            st.imported_source_keys.add(req.source_key)
-            if req.tab_type == "캐비닛":
-                if not req.rental_period.strip():
-                    req.rental_period = ctx.default_cabinet_period
-                reason = ctx.find_cabinet_conflict(req)
-                if reason:
-                    req.status = "반려"
-                    req.note = reason if not req.note.strip() else f"{req.note} / {reason}"
-                    st.approval_history.append(req)
-                    auto_rejected.append(req)
-                    continue
-            st.approvals.append(req)
-
+        merged = sync_merge.merge_new_requests(ctx, result.new_requests)
         win.refresh_approval_views()
         if result.new_requests:
             ctx.save_app_state()
 
-        if auto_rejected:
-            lines = "\n".join(f"• {r.student_name} ({r.student_id}) — {r.rental_period}" for r in auto_rejected)
-            w.warn(win, f"아래 {len(auto_rejected)}건은 캐비닛 배정 기간이 중복되어 자동으로 반려 처리되었습니다.\n\n{lines}\n\n"
-                        "[📋 승인/반려 내역]에서 확인하거나 복구할 수 있습니다.", "배정 중복 오류")
+        if merged.auto_rejected:
+            w.warn(win, sync_merge.auto_rejected_message(merged.auto_rejected), "배정 중복 오류")
 
-        added = len(result.new_requests) - equipment_pending_on_sheet
-        summary = f"[{now}] 응답 {result.total_rows}건 중 신규 {added}건 반영"
-        if result.duplicate_count:
-            summary += f" (기존 {result.duplicate_count}건 건너뜀)"
-        if equipment_pending_on_sheet:
-            summary += f" (기자재 시트 승인 대기 {equipment_pending_on_sheet}건 — 다음 동기화 때 재확인)"
-        by_type: dict[str, int] = {}
-        for a in st.approvals:
-            by_type[a.tab_type] = by_type.get(a.tab_type, 0) + 1
-        summary += "\n승인 대기: " + (" / ".join(f"{k} {v}건" for k, v in by_type.items()) if by_type else "없음")
-        if result.missing_columns:
-            summary += f"\n⚠ 헤더에서 찾지 못한 항목: {', '.join(result.missing_columns)}"
-        if result.unmapped_spaces:
-            summary += f"\n⚠ 신청 공간을 판별하지 못한 값: {' / '.join(result.unmapped_spaces)} → '미분류'로 등록됨"
-        for warning in result.warnings:
-            summary += f"\n⚠ {warning}"
-        win.settings_tab.set_sync_status(summary, bool(result.missing_columns or result.unmapped_spaces or result.warnings))
+        summary, warning = sync_merge.sync_summary(now, result, merged, st.approvals)
+        win.settings_tab.set_sync_status(summary, warning)
         if not silent:
             w.info(win, summary, "동기화 완료")
     finally:

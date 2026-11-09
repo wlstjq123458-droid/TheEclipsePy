@@ -15,7 +15,7 @@ from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLineEdit, QScrollArea, QCheckBox, QComboBox, QFileDialog, QDateEdit, QFrame,
 )
 
-from . import widgets as w
+from . import sync_merge, widgets as w
 from . import config
 from . import google_integration as gi
 from .models import SEASON_NAMES, SeasonPeriod, default_seasons_for
@@ -187,6 +187,20 @@ class SettingsTab(QWidget):
         pr.addStretch()
         y.addLayout(pr)
         y.addSpacing(12)
+        y.addWidget(w.label("지도교수 승인을 거친 신청만 받기 — 시트의 '승인상태'가 \"승인\"인 행만 들어오고, \"반려\"는 승인/반려 내역에 기록됩니다",
+                            11, color="#6B7280", wrap=True))
+        y.addSpacing(4)
+        ar = QHBoxLayout()
+        self.chk_approval = {}
+        for t in sync_merge.APPROVAL_TYPES:
+            cb = QCheckBox(t)
+            cb.setStyleSheet("QCheckBox { font-size:12px; }")
+            self.chk_approval[t] = cb
+            ar.addWidget(cb)
+            ar.addSpacing(14)
+        ar.addStretch()
+        y.addLayout(ar)
+        y.addSpacing(12)
         br = QHBoxLayout()
         self.btn_sync = w.action_btn("🔄 지금 동기화", padding=(8, 15), on_click=lambda: self.ctx.win.sync_now(False))
         br.addWidget(self.btn_sync)
@@ -291,6 +305,8 @@ class SettingsTab(QWidget):
         self.ed_cabinet.setText(s.get("CabinetFormUrl", ""))
         self.ed_equipment.setText(s.get("EquipmentFormUrl", ""))
         self.update_key_display()
+        for t, cb in self.chk_approval.items():
+            cb.setChecked(t in sync_merge.approval_types(s))
         self.chk_poll.blockSignals(True)
         self.chk_poll.setChecked(bool(s.get("PollingEnabled", True)))
         self.chk_poll.blockSignals(False)
@@ -369,6 +385,7 @@ class SettingsTab(QWidget):
             self.ed_interval.setText(str(s.get("PollingIntervalSeconds", 60)))
             return
         s["PollingIntervalSeconds"] = sec
+        s["ProfessorApprovalTypes"] = [t for t, cb in self.chk_approval.items() if cb.isChecked()]
         main_id = gi.extract_spreadsheet_id(s["SangsangLabFormUrl"])
         eq_id = gi.extract_spreadsheet_id(s["EquipmentFormUrl"])
         cab_id = gi.extract_spreadsheet_id(s["CabinetFormUrl"])

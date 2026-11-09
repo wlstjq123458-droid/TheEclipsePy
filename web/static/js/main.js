@@ -19,7 +19,7 @@ const NAV = [
 
 function loginPage(status) {
   const setup = status.setupRequired;
-  const username = h('input', { type: 'text', value: 'admin', autocomplete: 'username' });
+  const username = h('input', { type: 'text', autocomplete: 'username' });
   const password = h('input', { type: 'password', autocomplete: setup ? 'new-password' : 'current-password' });
   const again = h('input', { type: 'password', autocomplete: 'new-password' });
   const err = h('div', { class: 'err' });
