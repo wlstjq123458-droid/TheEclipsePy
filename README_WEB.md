@@ -10,7 +10,7 @@ python -m pip install -r requirements-web.txt
 python run_web.py
 ```
 
-브라우저에서 <http://127.0.0.1:8000> 을 엽니다.
+브라우저에서 <http://127.0.0.1:8002> 을 엽니다.
 
 - 첫 화면에서 관리자 비밀번호를 정합니다. 아이디는 `admin`입니다.
 - 첫 실행 때 C# 프로그램 데이터(`%APPDATA%\SeatManagerApp`)를 복사해 옵니다. 원본은 건드리지 않습니다.
