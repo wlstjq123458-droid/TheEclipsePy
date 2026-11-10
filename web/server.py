@@ -31,6 +31,13 @@ STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 COOKIE = "sm_session"
 MAX_UPLOAD_BYTES = 20 * 1024 * 1024
 LOCAL_CLIENTS = ("127.0.0.1", "::1")
+# 테스트용 더미 로그인: 이 컴퓨터(127.0.0.1)에서 열면 아이디·비밀번호를 아무렇게나 넣어도(빈칸도) 로그인된다.
+# 다른 컴퓨터에서 접속하면 기존처럼 실제 비밀번호를 확인한다. 끄려면 False로 바꾼다.
+DEMO_LOGIN = True
+
+
+def _demo(request: Request) -> bool:
+    return DEMO_LOGIN and _client(request) in LOCAL_CLIENTS
 XLSX = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 
 service: Service
@@ -181,7 +188,8 @@ def _routes(app: FastAPI):
     @r.get("/auth/status")
     def auth_status(request: Request):
         user = auth.session_user(request.cookies.get(COOKIE))
-        return {"user": user, "setupRequired": not auth.has_admin, "local": _client(request) in LOCAL_CLIENTS}
+        return {"user": user, "setupRequired": not auth.has_admin and not _demo(request),
+                "local": _client(request) in LOCAL_CLIENTS, "demo": _demo(request)}
 
     @r.post("/auth/setup")
     def auth_setup(request: Request, body: dict = Body(...)):
@@ -201,6 +209,9 @@ def _routes(app: FastAPI):
         if wait:
             raise Problem(f"로그인을 여러 번 실패했습니다. {wait}초 후에 다시 시도해 주세요.", "로그인", "warning")
         username = str(body.get("username", ""))
+        password = str(body.get("password", ""))
+        if _demo(request):
+            return _login_response(request, username or DEFAULT_USER)
         if not auth.verify(username, str(body.get("password", ""))):
             auth.record_failure(client)
             raise Problem("아이디 또는 비밀번호가 올바르지 않습니다.", "로그인")
