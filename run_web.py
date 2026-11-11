@@ -4,11 +4,11 @@
 내 컴퓨터에서 테스트:
     pip install -r requirements-web.txt
     python run_web.py
-    → 브라우저에서 http://127.0.0.1:8000
+    → 브라우저에서 http://127.0.0.1:8002
 
 학교 서버에서 (자세한 절차는 README_WEB.md):
     python run_web.py --set-password
-    python run_web.py --host 0.0.0.0 --port 8000
+    python run_web.py --host 0.0.0.0 --port 8002
 """
 import argparse
 import getpass
@@ -25,7 +25,7 @@ def default_data_dir() -> str:
 def main() -> None:
     parser = argparse.ArgumentParser(description="창공시스템 웹 서버")
     parser.add_argument("--host", default="127.0.0.1", help="접속을 받을 주소 (서버에서는 0.0.0.0). 기본: 이 컴퓨터에서만 접속")
-    parser.add_argument("--port", type=int, default=8000)
+    parser.add_argument("--port", type=int, default=8002)
     parser.add_argument("--data-dir", default=default_data_dir(), help="데이터를 저장할 폴더")
     parser.add_argument("--face-dir", default="", help="얼굴인식 연동 폴더 (기본: 사용자 폴더의 SeatManagerApp/face-integration)")
     parser.add_argument("--set-password", action="store_true", help="관리자 비밀번호를 정하고 끝낸다")
